@@ -1128,6 +1128,7 @@ export default function App() {
                     </tbody>
                   </table>
 
+                  {resumenFiltroCiudad && (
                   <div style={{ marginTop: 24 }}>
                     <h4 style={{ margin: '0 0 4px', fontSize: '0.95rem', color: '#0f172a' }}>
                       Desagregado por tipo de enfermedad
@@ -1164,6 +1165,7 @@ export default function App() {
                       </table>
                     )}
                   </div>
+                  )}
                 </>
               )}
             </div>
