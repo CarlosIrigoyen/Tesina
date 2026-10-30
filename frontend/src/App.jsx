@@ -153,7 +153,6 @@ export default function App() {
   const [loadingCasos, setLoadingCasos] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [localidades, setLocalidades] = useState([]);
-  const [radiosCiudad, setRadiosCiudad] = useState(null);
   const [filtroCiudad, setFiltroCiudad] = useState('');
   const [filtroRadio, setFiltroRadio] = useState('');
   const [filtroAnio, setFiltroAnio] = useState('');
@@ -427,14 +426,31 @@ export default function App() {
     [resumenFiltrado]
   );
 
+  // Radios de la ciudad elegida, derivados de los datos ya cargados.
+  // No depende del backend para que el filtro no vacíe la capa si falla una request.
+  const radiosCiudad = useMemo(() => {
+    if (!filtroCiudad || !geoJsonData?.features) return null;
+    const ids = new Set();
+    (casosGeoJson?.features || []).forEach(f => {
+      const p = f.properties || {};
+      if (p.localidad === filtroCiudad && p.radio_censal_id) {
+        ids.add(String(p.radio_censal_id));
+      }
+    });
+    return {
+      ...geoJsonData,
+      features: geoJsonData.features.filter(f => ids.has(String(f.properties?.link ?? '')))
+    };
+  }, [geoJsonData, casosGeoJson, filtroCiudad]);
+
   const boundsCiudad = useMemo(() => {
-    if (!filtroCiudad || !radiosCiudad?.features?.length) return null;
+    if (!radiosCiudad?.features?.length) return null;
     const bounds = L.geoJSON(radiosCiudad).getBounds();
     if (!bounds.isValid()) return null;
     const sw = bounds.getSouthWest();
     const ne = bounds.getNorthEast();
     return [[sw.lat, sw.lng], [ne.lat, ne.lng]];
-  }, [filtroCiudad, radiosCiudad]);
+  }, [radiosCiudad]);
 
   const radiosMostrados = filtroCiudad ? radiosCiudad : geoJsonData;
   const boundsMostrados = boundsCiudad || mapBounds;
@@ -469,17 +485,6 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (!filtroCiudad) return;
-    const loc = encodeURIComponent(filtroCiudad);
-    axios.get(`http://localhost:8000/api/v1/experimentos/ciudad/radios-geojson?localidad=${loc}`)
-      .then(res => setRadiosCiudad(res.data))
-      .catch(e => {
-        console.error('Error al cargar radios de la ciudad:', e);
-        setRadiosCiudad(null);
-      });
-  }, [filtroCiudad]);
 
   function cargarDatosRadios() {
     setLoading(true);
@@ -542,7 +547,6 @@ export default function App() {
     setFiltroRadio('');
     setFiltroAnio('');
     setFiltroSemana('');
-    setRadiosCiudad(null);
     reiniciarAnimacion();
     cargarDatosRadios();
   };
@@ -552,7 +556,6 @@ export default function App() {
     setFiltroRadio('');
     setFiltroAnio('');
     setFiltroSemana('');
-    setRadiosCiudad(null);
     reiniciarAnimacion();
   };
 
@@ -682,7 +685,6 @@ export default function App() {
             <small style={{ color: '#94a3b8' }}>
               {loading ? 'Cargando radios...' : `Radios: ${radiosMostrados?.features?.length || 0}`}
               {casosFiltrados ? ` | Casos: ${casosFiltrados.features.length}${filtrosActivos ? ` de ${casosGeoJson?.features?.length || 0}` : ''}` : ''}
-              {filtrosActivos ? ' | Filtros activos' : ''}
             </small>
           </div>
         </div>
@@ -705,7 +707,6 @@ export default function App() {
                   setFiltroRadio('');
                   setFiltroAnio('');
                   setFiltroSemana('');
-                  setRadiosCiudad(null);
                   reiniciarAnimacion();
                 }}
                 style={{ ...navSelectStyle, minWidth: 170 }}
