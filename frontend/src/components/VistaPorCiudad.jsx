@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { MapContainer, TileLayer, GeoJSON, LayersControl, Circle, useMap } from 'react-leaflet';
 import axios from 'axios';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import LeyendaEnfermedades from './LeyendaEnfermedades';
+import { colorPorEvento } from '../utils/eventos';
 
 const { BaseLayer, Overlay } = LayersControl;
 
@@ -77,7 +78,6 @@ export default function VistaPorCiudad() {
 
   const [clustering, setClustering] = useState(null);
   const [exploracion, setExploracion] = useState(null);
-  const [labelsLocales, setLabelsLocales] = useState(null);
   const [minSamples, setMinSamples] = useState(4);
   const [maxEpsOptics, setMaxEpsOptics] = useState(10);
   const [epsTemporal, setEpsTemporal] = useState(2);
@@ -96,39 +96,42 @@ export default function VistaPorCiudad() {
 
   const casosConJitter = useMemo(() => aplicarJitter(casosGeoJson), [casosGeoJson]);
 
-  useEffect(() => {
-    setPaginaActual(1);
-  }, [ciudadSel]);
+  const eventosDisponibles = useMemo(() => {
+    const set = new Set();
+    (casosGeoJson?.features || []).forEach(f => {
+      const evento = f.properties?.evento;
+      if (evento) set.add(evento);
+    });
+    return [...set].sort((a, b) => a.localeCompare(b, 'es'));
+  }, [casosGeoJson]);
 
   useEffect(() => {
-    setLoadingLocalidades(true);
+    let activo = true;
     axios.get('http://localhost:8000/api/v1/experimentos/localidades')
       .then(res => {
+        if (!activo) return;
         setLocalidades(res.data);
-        if (res.data.length > 0 && !ciudadSel) {
-          setCiudadSel(res.data[0].localidad);
+        if (res.data.length > 0) {
+          setLoading(true);
+          setCiudadSel(prev => prev || res.data[0].localidad);
         }
       })
       .catch(e => {
+        if (!activo) return;
         console.error('Error cargando localidades:', e);
         setError('Error al cargar la lista de localidades');
       })
-      .finally(() => setLoadingLocalidades(false));
+      .finally(() => {
+        if (activo) setLoadingLocalidades(false);
+      });
+    return () => {
+      activo = false;
+    };
   }, []);
 
   useEffect(() => {
     if (!ciudadSel) return;
-    setRadiosGeoJson(null);
-    setCasosGeoJson(null);
-    setDesagregado([]);
-    setClustering(null);
-    setExploracion(null);
-    setLabelsLocales(null);
-    setSatscan(null);
-    setSatscanMulti(null);
-    setError('');
-    setLoading(true);
-
+    let activo = true;
     const base = 'http://localhost:8000/api/v1/experimentos/ciudad';
     const locEnc = encodeURIComponent(ciudadSel);
 
@@ -138,16 +141,38 @@ export default function VistaPorCiudad() {
       axios.get(`${base}/desagregado?localidad=${locEnc}`),
     ])
       .then(([rRadios, rCasos, rDesag]) => {
+        if (!activo) return;
         setRadiosGeoJson(rRadios.data);
         setCasosGeoJson(rCasos.data);
         setDesagregado(rDesag.data);
       })
       .catch(e => {
+        if (!activo) return;
         console.error('Error cargando datos de la ciudad:', e);
         setError(`Error al cargar "${ciudadSel}".`);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (activo) setLoading(false);
+      });
+    return () => {
+      activo = false;
+    };
   }, [ciudadSel]);
+
+  const cambiarCiudad = (nuevaCiudad) => {
+    if (!nuevaCiudad) return;
+    setPaginaActual(1);
+    setRadiosGeoJson(null);
+    setCasosGeoJson(null);
+    setDesagregado([]);
+    setClustering(null);
+    setExploracion(null);
+    setSatscan(null);
+    setSatscanMulti(null);
+    setError('');
+    setLoading(true);
+    setCiudadSel(nuevaCiudad);
+  };
 
   const ejecutarClustering = async () => {
     if (!ciudadSel) return;
@@ -159,7 +184,6 @@ export default function VistaPorCiudad() {
       );
       setExploracion(res.data.exploracion_optics);
       setClustering(res.data.clustering_final);
-      setLabelsLocales(res.data.labels_por_id);
     } catch (e) {
       console.error(e);
       alert('Error en clustering local');
@@ -204,22 +228,11 @@ export default function VistaPorCiudad() {
     }
   };
 
-  const colorCluster = (c) => {
-    if (c === null || c === undefined || c === -1) return '#94a3b8';
-    return `hsl(${(c * 47) % 360}, 70%, 50%)`;
-  };
-
   const pointToLayer = (feature, latlng) => {
-    const idCaso = String(feature.properties.id_caso);
-    const clusterLocal = labelsLocales ? labelsLocales[idCaso] : null;
-    const clusterGlobal = feature.properties.cluster_stdbscan;
-    const cluster = (clusterLocal !== null && clusterLocal !== undefined) ? clusterLocal : clusterGlobal;
-    const color = colorCluster(cluster);
-
     return L.circleMarker(latlng, {
       radius: 6,
-      fillColor: color,
-      color: '#000',
+      fillColor: colorPorEvento(feature.properties.evento),
+      color: '#111827',
       weight: 1,
       fillOpacity: 0.85
     });
@@ -227,14 +240,6 @@ export default function VistaPorCiudad() {
 
   const onEachFeatureCaso = (f, l) => {
     const p = f.properties;
-    const idCaso = String(p.id_caso);
-    const clusterLocal = labelsLocales ? labelsLocales[idCaso] : null;
-    const clusterGlobal = p.cluster_stdbscan;
-    const clusterTexto = (c) => {
-      if (c === null || c === undefined) return 'Sin cluster';
-      if (c === -1) return 'Ruido';
-      return `Cluster ${c}`;
-    };
 
     l.bindPopup(`
       <div style="font-family: sans-serif; font-size: 13px;">
@@ -242,10 +247,7 @@ export default function VistaPorCiudad() {
         Caso: ${p.id_caso}<br/>
         Radio: ${p.radio_censal_id}<br/>
         Localidad: ${p.localidad}<br/>
-        Semana: ${p.semana}/${p.anio}<br/>
-        <hr style="margin: 4px 0;"/>
-        Cluster global: ${clusterTexto(clusterGlobal)}<br/>
-        Cluster local: ${clusterTexto(clusterLocal)}
+        Semana: ${p.semana}/${p.anio}
       </div>
     `);
   };
@@ -284,7 +286,7 @@ export default function VistaPorCiudad() {
           <b>Ciudad:</b>{' '}
           <select
             value={ciudadSel}
-            onChange={(e) => setCiudadSel(e.target.value)}
+            onChange={(e) => cambiarCiudad(e.target.value)}
             style={{
               padding: '6px 12px',
               borderRadius: 4,
@@ -459,7 +461,7 @@ export default function VistaPorCiudad() {
               <Overlay checked name="Casos">
                 {casosConJitter && (
                   <GeoJSON
-                    key={`casos-${ciudadSel}-${labelsLocales ? 'cl' : 'nc'}`}
+                    key={`casos-${ciudadSel}`}
                     data={casosConJitter}
                     pointToLayer={pointToLayer}
                     onEachFeature={onEachFeatureCaso}
@@ -508,6 +510,7 @@ export default function VistaPorCiudad() {
               </Overlay>
             </LayersControl>
           </MapContainer>
+          <LeyendaEnfermedades eventos={eventosDisponibles} />
         </div>
 
         {/* Panel lateral */}

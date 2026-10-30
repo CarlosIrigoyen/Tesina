@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { MapContainer, TileLayer, GeoJSON, LayersControl, useMap } from 'react-leaflet';
 import axios from 'axios';
 import L from 'leaflet';
@@ -8,6 +8,11 @@ import VistaClustering from './components/VistaClustering';
 import VistaSaTScan from './components/VistaSaTScan';
 import PanelIndices from './components/PanelIndices';
 import VistaPorCiudad from './components/VistaPorCiudad';
+import HeatmapLayer from './components/HeatmapLayer';
+import HeatmapFrame from './components/HeatmapFrame';
+import PanelTemporal from './components/PanelTemporal';
+import LeyendaEnfermedades from './components/LeyendaEnfermedades';
+import { colorPorEvento } from './utils/eventos';
 
 const { BaseLayer, Overlay } = LayersControl;
 
@@ -18,32 +23,6 @@ const STORAGE_KEYS = {
   casos: 'app_casos_v1',
   resumen: 'app_resumen_v1',
   metricas: 'app_metricas_v1',
-};
-
-const COLORES_EVENTO = {
-  'Sífilis': '#e11d48',
-  'VIH': '#2563eb',
-  'Sífilis en Personas Gestantes': '#f59e0b',
-  'Sífilis - RN Expuesto en Investigación': '#7c3aed',
-  'Hepatitis C': '#059669',
-  'Hepatitis B': '#0891b2',
-  'Gonorrea': '#db2777',
-  'VIH - Expuesto Perinatal': '#65a30d',
-  'VIH en Embarazo': '#0f766e',
-  'Infecciones Genitales (Otras)': '#9333ea',
-  'Sífilis Congénita': '#dc2626',
-  'Htlv': '#475569',
-};
-
-const PALETA_EVENTOS = ['#e11d48', '#2563eb', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#65a30d'];
-
-const colorPorEvento = (evento = '') => {
-  if (COLORES_EVENTO[evento]) return COLORES_EVENTO[evento];
-  let hash = 0;
-  for (let i = 0; i < evento.length; i++) {
-    hash = (hash * 31 + evento.charCodeAt(i)) >>> 0;
-  }
-  return PALETA_EVENTOS[hash % PALETA_EVENTOS.length];
 };
 
 function MapController({ bounds }) {
@@ -122,6 +101,45 @@ function aplicarJitter(geojson) {
   };
 }
 
+// Detecta picos semanales usando media + 1.5 desvíos estándar y máximos locales.
+function detectarPicos(serie) {
+  if (!serie || serie.length < 3) return { picos: [], umbral: 0, media: 0 };
+
+  const valores = serie.map(d => d.casos);
+  const media = valores.reduce((a, b) => a + b, 0) / valores.length;
+  const varianza = valores.reduce((a, b) => a + (b - media) ** 2, 0) / valores.length;
+  const desvio = Math.sqrt(varianza);
+  const umbral = media + 1.5 * desvio;
+
+  if (desvio === 0) return { picos: [], umbral, media };
+
+  const esMaximoLocal = (i) => {
+    const actual = valores[i];
+    const anterior = i > 0 ? valores[i - 1] : -Infinity;
+    const siguiente = i < valores.length - 1 ? valores[i + 1] : -Infinity;
+    return actual >= anterior && actual >= siguiente;
+  };
+
+  const recolectar = (condicion) => serie.reduce((acc, d, i) => {
+    if (condicion(d, i) && esMaximoLocal(i)) {
+      acc.push({ ...d, zScore: (d.casos - media) / desvio });
+    }
+    return acc;
+  }, []);
+
+  let picos = recolectar(d => d.casos >= umbral);
+
+  if (picos.length === 0) {
+    picos = recolectar(d => d.casos > media);
+  }
+
+  return {
+    picos: picos.sort((a, b) => b.casos - a.casos),
+    umbral,
+    media
+  };
+}
+
 export default function App() {
   const [vista, setVista] = useState(() => readStorage(STORAGE_KEYS.vista) || 'principal');
 
@@ -134,13 +152,20 @@ export default function App() {
   const [loading, setLoading] = useState(!geoJsonData);
   const [loadingCasos, setLoadingCasos] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [leyendaAbierta, setLeyendaAbierta] = useState(true);
   const [localidades, setLocalidades] = useState([]);
   const [radiosCiudad, setRadiosCiudad] = useState(null);
   const [filtroCiudad, setFiltroCiudad] = useState('');
   const [filtroRadio, setFiltroRadio] = useState('');
   const [filtroAnio, setFiltroAnio] = useState('');
   const [filtroSemana, setFiltroSemana] = useState('');
+  const [mostrarCalor, setMostrarCalor] = useState(false);
+  const [mostrarTemporal, setMostrarTemporal] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [frameActual, setFrameActual] = useState(0);
+  const [velocidad, setVelocidad] = useState(700);
+  const [resumenModalOpen, setResumenModalOpen] = useState(false);
+  const [resumenFiltroAnio, setResumenFiltroAnio] = useState('');
+  const [resumenFiltroCiudad, setResumenFiltroCiudad] = useState('');
 
   const filtrosActivos = Boolean(filtroCiudad || filtroRadio || filtroAnio || filtroSemana);
 
@@ -193,6 +218,78 @@ export default function App() {
 
   const casosConJitter = useMemo(() => aplicarJitter(casosFiltrados), [casosFiltrados]);
 
+  // Serie temporal de casos por año + semana epidemiológica.
+  const serieTemporal = useMemo(() => {
+    const mapa = new Map();
+    (casosFiltrados?.features || []).forEach(f => {
+      const p = f.properties || {};
+      const anio = Number(p.anio);
+      const semana = Number(p.semana);
+      if (!Number.isFinite(anio) || !Number.isFinite(semana)) return;
+
+      const key = `${anio}-${String(semana).padStart(2, '0')}`;
+      const existente = mapa.get(key);
+      if (existente) {
+        existente.casos += 1;
+      } else {
+        mapa.set(key, {
+          key,
+          anio,
+          semana,
+          label: `${anio}-S${String(semana).padStart(2, '0')}`,
+          casos: 1
+        });
+      }
+    });
+
+    return [...mapa.values()].sort((a, b) => a.anio - b.anio || a.semana - b.semana);
+  }, [casosFiltrados]);
+
+  const { picos, umbral, media } = useMemo(() => detectarPicos(serieTemporal), [serieTemporal]);
+
+  const frameActualSeguro = serieTemporal.length === 0
+    ? 0
+    : Math.min(frameActual, serieTemporal.length - 1);
+
+  const frameActualKey = serieTemporal[frameActualSeguro]?.key;
+
+  const puntosCalor = useMemo(() => {
+    if (!casosFiltrados?.features) return [];
+    return casosFiltrados.features.map(f => {
+      const [lon, lat] = f.geometry?.coordinates || [];
+      return [lat, lon, 1];
+    }).filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+  }, [casosFiltrados]);
+
+  // Durante la animación solo se dibujan los casos del frame (año + semana) actual.
+  const casosMapa = useMemo(() => {
+    if (!mostrarTemporal || !frameActualKey || !casosConJitter?.features) {
+      return casosConJitter;
+    }
+    const [anio, semana] = frameActualKey.split('-').map(Number);
+    return {
+      ...casosConJitter,
+      features: casosConJitter.features.filter(f => {
+        const p = f.properties || {};
+        return Number(p.anio) === anio && Number(p.semana) === semana;
+      })
+    };
+  }, [mostrarTemporal, frameActualKey, casosConJitter]);
+
+  // Avance automático de la animación temporal.
+  useEffect(() => {
+    if (!playing || serieTemporal.length === 0) return undefined;
+    const timer = setInterval(() => {
+      setFrameActual(i => (i + 1) % serieTemporal.length);
+    }, velocidad);
+    return () => clearInterval(timer);
+  }, [playing, serieTemporal.length, velocidad]);
+
+  const reiniciarAnimacion = () => {
+    setFrameActual(0);
+    setPlaying(false);
+  };
+
   const eventosDisponibles = useMemo(() => {
     const set = new Set();
     (casosFiltrados?.features || []).forEach(f => {
@@ -229,6 +326,106 @@ export default function App() {
       .sort((a, b) => b[1] - a[1])
       .map(([id, casos]) => ({ id, casos }));
   }, [casosGeoJson, filtroCiudad]);
+
+  const resumenAniosDisponibles = useMemo(() => {
+    const set = new Set();
+    (casosGeoJson?.features || []).forEach(f => {
+      const anio = f.properties?.anio;
+      if (anio !== null && anio !== undefined) set.add(String(anio));
+    });
+    return [...set].sort((a, b) => Number(b) - Number(a));
+  }, [casosGeoJson]);
+
+  const resumenCiudadesDisponibles = useMemo(() => {
+    const set = new Set();
+    (casosGeoJson?.features || []).forEach(f => {
+      const localidad = f.properties?.localidad;
+      if (localidad) set.add(localidad);
+    });
+    if (set.size === 0) {
+      (resumen || []).forEach(r => {
+        if (r.localidad) set.add(r.localidad);
+      });
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, 'es'));
+  }, [casosGeoJson, resumen]);
+
+  const casosResumenFiltrados = useMemo(() => {
+    return (casosGeoJson?.features || []).filter(f => {
+      const p = f.properties || {};
+      if (resumenFiltroAnio && String(p.anio) !== resumenFiltroAnio) return false;
+      if (resumenFiltroCiudad && p.localidad !== resumenFiltroCiudad) return false;
+      return true;
+    });
+  }, [casosGeoJson, resumenFiltroAnio, resumenFiltroCiudad]);
+
+  const resumenFiltrado = useMemo(() => {
+    if (casosResumenFiltrados.length > 0) {
+      const total = casosResumenFiltrados.length;
+      const mapa = new Map();
+      casosResumenFiltrados.forEach(f => {
+        const p = f.properties || {};
+        const localidad = p.localidad || 'Sin localidad';
+        const departamento = p.departamento || '';
+        const key = `${localidad}|${departamento}`;
+        const actual = mapa.get(key);
+        if (actual) {
+          actual.total_casos += 1;
+        } else {
+          mapa.set(key, { localidad, departamento, total_casos: 1 });
+        }
+      });
+
+      return [...mapa.values()]
+        .map(r => ({
+          ...r,
+          porcentaje: total ? Number(((r.total_casos * 100) / total).toFixed(2)) : 0
+        }))
+        .sort((a, b) => b.total_casos - a.total_casos || a.localidad.localeCompare(b.localidad, 'es'));
+    }
+
+    let base = resumen || [];
+    if (resumenFiltroCiudad) {
+      base = base.filter(r => r.localidad === resumenFiltroCiudad);
+    }
+    return base;
+  }, [casosResumenFiltrados, resumen, resumenFiltroCiudad]);
+
+  const resumenEnfermedades = useMemo(() => {
+    if (casosResumenFiltrados.length === 0) return [];
+
+    const total = casosResumenFiltrados.length;
+    const mapa = new Map();
+    casosResumenFiltrados.forEach(f => {
+      const p = f.properties || {};
+      const localidad = p.localidad || 'Sin localidad';
+      const departamento = p.departamento || '';
+      const evento = p.evento || 'Sin tipo de enfermedad';
+      const key = `${localidad}|${departamento}|${evento}`;
+      const actual = mapa.get(key);
+      if (actual) {
+        actual.total_casos += 1;
+      } else {
+        mapa.set(key, { localidad, departamento, evento, total_casos: 1 });
+      }
+    });
+
+    return [...mapa.values()]
+      .map(r => ({
+        ...r,
+        porcentaje: total ? Number(((r.total_casos * 100) / total).toFixed(2)) : 0
+      }))
+      .sort((a, b) => (
+        a.localidad.localeCompare(b.localidad, 'es')
+        || b.total_casos - a.total_casos
+        || a.evento.localeCompare(b.evento, 'es')
+      ));
+  }, [casosResumenFiltrados]);
+
+  const resumenTotalCasos = useMemo(
+    () => resumenFiltrado.reduce((acc, r) => acc + Number(r.total_casos || 0), 0),
+    [resumenFiltrado]
+  );
 
   const boundsCiudad = useMemo(() => {
     if (!filtroCiudad || !radiosCiudad?.features?.length) return null;
@@ -284,7 +481,7 @@ export default function App() {
       });
   }, [filtroCiudad]);
 
-  const cargarDatosRadios = () => {
+  function cargarDatosRadios() {
     setLoading(true);
 
     Promise.all([
@@ -302,7 +499,7 @@ export default function App() {
         console.error('Error al cargar datos:', error);
         setLoading(false);
       });
-  };
+  }
 
   const cargarCasos = async () => {
     setLoadingCasos(true);
@@ -319,19 +516,6 @@ export default function App() {
     }
   };
 
-  const ejecutarClustering = async () => {
-    try {
-      const res = await axios.get('http://localhost:8000/api/v1/experimentos/flujo-clustering');
-      setMetricas(res.data.clustering_final);
-      const resCasos = await axios.get('http://localhost:8000/api/v1/experimentos/casos-geojson');
-      setCasosGeoJson(resCasos.data);
-      alert('Clustering ejecutado.');
-    } catch (error) {
-      console.error('Error en clustering:', error);
-      alert('Error al ejecutar clustering');
-    }
-  };
-
   const cargarResumen = async () => {
     try {
       const res = await axios.get('http://localhost:8000/api/v1/experimentos/resumen-por-ciudad');
@@ -339,6 +523,11 @@ export default function App() {
     } catch (error) {
       console.error('Error al obtener resumen:', error);
     }
+  };
+
+  const abrirResumen = () => {
+    setResumenModalOpen(true);
+    cargarResumen();
   };
 
   const limpiarTodo = () => {
@@ -354,6 +543,7 @@ export default function App() {
     setFiltroAnio('');
     setFiltroSemana('');
     setRadiosCiudad(null);
+    reiniciarAnimacion();
     cargarDatosRadios();
   };
 
@@ -363,6 +553,7 @@ export default function App() {
     setFiltroAnio('');
     setFiltroSemana('');
     setRadiosCiudad(null);
+    reiniciarAnimacion();
   };
 
   const radioStyle = {
@@ -515,6 +706,7 @@ export default function App() {
                   setFiltroAnio('');
                   setFiltroSemana('');
                   setRadiosCiudad(null);
+                  reiniciarAnimacion();
                 }}
                 style={{ ...navSelectStyle, minWidth: 170 }}
               >
@@ -535,6 +727,7 @@ export default function App() {
                   setFiltroRadio(e.target.value);
                   setFiltroAnio('');
                   setFiltroSemana('');
+                  reiniciarAnimacion();
                 }}
                 disabled={!filtroCiudad}
                 style={{ ...navSelectStyle, minWidth: 170, opacity: filtroCiudad ? 1 : 0.55 }}
@@ -555,6 +748,7 @@ export default function App() {
                 onChange={(e) => {
                   setFiltroAnio(e.target.value);
                   setFiltroSemana('');
+                  reiniciarAnimacion();
                 }}
                 style={{ ...navSelectStyle, minWidth: 100 }}
               >
@@ -569,7 +763,10 @@ export default function App() {
               Semana
               <select
                 value={filtroSemana}
-                onChange={(e) => setFiltroSemana(e.target.value)}
+                onChange={(e) => {
+                  setFiltroSemana(e.target.value);
+                  reiniciarAnimacion();
+                }}
                 style={{ ...navSelectStyle, minWidth: 105 }}
               >
                 <option value="">Todas</option>
@@ -593,13 +790,28 @@ export default function App() {
 
             <span style={{ borderLeft: '1px solid #334155', height: 30, margin: '0 2px' }} />
 
+            <button
+              onClick={() => setMostrarCalor(v => !v)}
+              style={btnStyle(mostrarCalor, '#0ea5e9')}
+              title="Superponer mapa de calor con todos los casos filtrados"
+            >
+              Mapa de calor
+            </button>
+            <button
+              onClick={() => {
+                setMostrarTemporal(v => !v);
+                setPlaying(false);
+              }}
+              style={btnStyle(mostrarTemporal, '#0891b2')}
+              title="Animar casos por año y semana epidemiológica y detectar picos"
+            >
+              Picos / Animación
+            </button>
+
             <button onClick={cargarCasos} disabled={loadingCasos} style={btnStyle(false, '#e11d48')}>
               {loadingCasos ? 'Cargando...' : 'Cargar casos'}
             </button>
-            <button onClick={ejecutarClustering} style={btnStyle(false, '#7c3aed')}>
-              Ejecutar clustering
-            </button>
-            <button onClick={cargarResumen} style={btnStyle(false, '#059669')}>
+            <button onClick={abrirResumen} style={btnStyle(false, '#059669')}>
               Ver resumen
             </button>
             <button onClick={limpiarTodo} style={btnStyle(false, '#dc2626')}>
@@ -629,8 +841,7 @@ export default function App() {
             overflowY: 'auto',
             boxShadow: '2px 0 16px rgba(0,0,0,0.4)'
           }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <h3 style={{ margin: 0, fontSize: '1.15rem' }}>Menú</h3>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 8 }}>
               <button
                 onClick={() => setMenuOpen(false)}
                 aria-label="Cerrar menú"
@@ -640,13 +851,12 @@ export default function App() {
               </button>
             </div>
 
-            <div style={{ margin: '8px 0 10px', fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Vistas</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <button onClick={() => { setVista('principal'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'principal', '#2563eb')}>Principal</button>
               <button onClick={() => { setVista('clustering'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'clustering', '#7c3aed')}>Clustering</button>
               <button onClick={() => { setVista('satscan'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'satscan', '#059669')}>SaTScan</button>
               <button onClick={() => { setVista('indices'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'indices', '#ea580c')}>Índices</button>
-              <button onClick={() => { setVista('ciudad'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'ciudad', '#0891b2')}>Por Ciudad</button>
+              <button onClick={() => { setVista('ciudad'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'ciudad', '#0891b2')}>Índice por Ciudad</button>
             </div>
 
           </aside>
@@ -698,49 +908,44 @@ export default function App() {
                       )}
                     </Overlay>
 
-                    <Overlay checked name="Casos ETS">
-                      {casosConJitter && (
+                    <Overlay checked name={mostrarTemporal ? `Casos ETS ${frameActualKey || ''}` : 'Casos ETS'}>
+                      {casosMapa && (
                         <GeoJSON
-                          key={`casos-${filtroCiudad}|${filtroRadio}|${filtroAnio}|${filtroSemana}|${casosConJitter.features.length}`}
-                          data={casosConJitter}
+                          key={`casos-${filtroCiudad}|${filtroRadio}|${filtroAnio}|${filtroSemana}|${frameActualKey || ''}|${casosMapa.features.length}`}
+                          data={casosMapa}
                           pointToLayer={(feature, latlng) => L.circleMarker(latlng, pointStyleCasos(feature))}
                           onEachFeature={onEachFeatureCaso}
                         />
                       )}
                     </Overlay>
                   </LayersControl>
+
+                  {mostrarTemporal && frameActualKey && (
+                    <HeatmapFrame casosGeoJson={casosFiltrados} frame={frameActualKey} />
+                  )}
+
+                  {mostrarCalor && !mostrarTemporal && puntosCalor.length > 0 && (
+                    <HeatmapLayer puntos={puntosCalor} radio={28} blur={18} />
+                  )}
                 </MapContainer>
 
-                {resumen && (
-                  <div style={{
-                    position: 'absolute', bottom: 20, left: 20,
-                    background: 'white', padding: 15, borderRadius: 8,
-                    boxShadow: '0 0 10px rgba(0,0,0,0.3)',
-                    maxHeight: 300, overflowY: 'auto', zIndex: 1000, fontSize: '0.9rem'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <h4 style={{ marginTop: 0 }}>Resumen por Localidad</h4>
-                      <button onClick={() => setResumen(null)} style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '1.2rem' }}>×</button>
-                    </div>
-                    <table style={{ borderCollapse: 'collapse', width: '100%' }}>
-                      <thead>
-                        <tr style={{ borderBottom: '1px solid #ccc' }}>
-                          <th style={{ textAlign: 'left', padding: 4 }}>Localidad</th>
-                          <th style={{ textAlign: 'right', padding: 4 }}>Casos</th>
-                          <th style={{ textAlign: 'right', padding: 4 }}>%</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {resumen.map((item, idx) => (
-                          <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
-                            <td style={{ padding: 4 }}>{item.localidad}</td>
-                            <td style={{ textAlign: 'right', padding: 4 }}>{item.total_casos}</td>
-                            <td style={{ textAlign: 'right', padding: 4 }}>{item.porcentaje}%</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                {mostrarTemporal && (
+                  <PanelTemporal
+                    serie={serieTemporal}
+                    picos={picos}
+                    umbral={umbral}
+                    media={media}
+                    frameActual={frameActualSeguro}
+                    onFrameChange={setFrameActual}
+                    playing={playing}
+                    onTogglePlaying={() => setPlaying(p => !p)}
+                    velocidad={velocidad}
+                    onVelocidadChange={setVelocidad}
+                    onClose={() => {
+                      setMostrarTemporal(false);
+                      setPlaying(false);
+                    }}
+                  />
                 )}
 
                 {metricas && (
@@ -760,55 +965,7 @@ export default function App() {
                   </div>
                 )}
 
-                {eventosDisponibles.length > 0 && (
-                  <div style={{
-                    position: 'absolute', bottom: 24, right: 20,
-                    background: 'white', padding: '10px 12px', borderRadius: 8,
-                    boxShadow: '0 0 10px rgba(0,0,0,0.3)',
-                    zIndex: 1000, fontSize: '0.78rem', maxWidth: 260,
-                    maxHeight: leyendaAbierta ? '40vh' : 'none',
-                    overflowY: leyendaAbierta ? 'auto' : 'hidden'
-                  }}>
-                    <button
-                      onClick={() => setLeyendaAbierta(v => !v)}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                        width: '100%',
-                        padding: 0,
-                        border: 'none',
-                        background: 'transparent',
-                        cursor: 'pointer',
-                        fontWeight: 'bold',
-                        fontSize: '0.85rem',
-                        color: '#0f172a',
-                        textAlign: 'left'
-                      }}
-                    >
-                      <span>Enfermedades ({eventosDisponibles.length})</span>
-                      <span>{leyendaAbierta ? '▾' : '▸'}</span>
-                    </button>
-                    {leyendaAbierta && (
-                      <div style={{ marginTop: 8 }}>
-                        {eventosDisponibles.map(evento => (
-                          <div key={evento} style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
-                            <span style={{
-                              width: 11,
-                              height: 11,
-                              borderRadius: '50%',
-                              background: colorPorEvento(evento),
-                              border: '1px solid #111827',
-                              flexShrink: 0
-                            }} />
-                            <span>{evento}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                <LeyendaEnfermedades eventos={eventosDisponibles} />
               </>
             )}
           </>
@@ -819,6 +976,216 @@ export default function App() {
         {vista === 'indices' && <PanelIndices />}
         {vista === 'ciudad' && <VistaPorCiudad />}
       </div>
+
+      {resumenModalOpen && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(15, 23, 42, 0.65)',
+          zIndex: 3000,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 20
+        }}>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="resumen-modal-title"
+            style={{
+              background: 'white',
+              borderRadius: 10,
+              width: '100%',
+              maxWidth: 760,
+              maxHeight: '85vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 20px 50px rgba(0,0,0,0.35)'
+            }}
+          >
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '14px 18px',
+              borderBottom: '1px solid #e2e8f0'
+            }}>
+              <h3 id="resumen-modal-title" style={{ margin: 0, fontSize: '1.15rem', color: '#0f172a' }}>
+                Resumen por Localidad
+              </h3>
+              <button
+                onClick={() => setResumenModalOpen(false)}
+                aria-label="Cerrar resumen"
+                style={{
+                  border: 'none',
+                  background: 'transparent',
+                  color: '#0f172a',
+                  fontSize: '1.7rem',
+                  lineHeight: 1,
+                  cursor: 'pointer'
+                }}
+              >
+                ×
+              </button>
+            </div>
+
+            <div style={{
+              display: 'flex',
+              alignItems: 'flex-end',
+              gap: 10,
+              flexWrap: 'wrap',
+              padding: '12px 18px',
+              borderBottom: '1px solid #e2e8f0',
+              background: '#f8fafc'
+            }}>
+              <label style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+                fontSize: '0.72rem',
+                color: '#475569',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em'
+              }}>
+                Año
+                <select
+                  value={resumenFiltroAnio}
+                  onChange={(e) => setResumenFiltroAnio(e.target.value)}
+                  style={{
+                    minWidth: 110,
+                    padding: '7px 9px',
+                    borderRadius: 6,
+                    border: '1px solid #cbd5e1',
+                    background: 'white',
+                    color: '#0f172a',
+                    fontSize: '0.85rem'
+                  }}
+                >
+                  <option value="">Todos</option>
+                  {resumenAniosDisponibles.map(a => (
+                    <option key={a} value={a}>{a}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4,
+                fontSize: '0.72rem',
+                color: '#475569',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em'
+              }}>
+                Ciudad
+                <select
+                  value={resumenFiltroCiudad}
+                  onChange={(e) => setResumenFiltroCiudad(e.target.value)}
+                  style={{
+                    minWidth: 210,
+                    padding: '7px 9px',
+                    borderRadius: 6,
+                    border: '1px solid #cbd5e1',
+                    background: 'white',
+                    color: '#0f172a',
+                    fontSize: '0.85rem'
+                  }}
+                >
+                  <option value="">Todas las ciudades</option>
+                  {resumenCiudadesDisponibles.map(c => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div style={{ padding: '12px 18px 18px', overflowY: 'auto' }}>
+              {resumenFiltrado.length === 0 ? (
+                <p style={{ margin: 0, color: '#64748b', fontSize: '0.9rem' }}>
+                  No hay datos para los filtros seleccionados.
+                </p>
+              ) : (
+                <>
+                  <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9rem' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '2px solid #cbd5e1', color: '#475569' }}>
+                        <th style={{ textAlign: 'left', padding: 7 }}>Localidad</th>
+                        <th style={{ textAlign: 'left', padding: 7 }}>Departamento</th>
+                        <th style={{ textAlign: 'right', padding: 7 }}>Casos</th>
+                        <th style={{ textAlign: 'right', padding: 7 }}>%</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {resumenFiltrado.map((item, idx) => (
+                        <tr key={`${item.localidad}-${item.departamento}-${idx}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                          <td style={{ padding: 7 }}>{item.localidad}</td>
+                          <td style={{ padding: 7 }}>{item.departamento || '—'}</td>
+                          <td style={{ textAlign: 'right', padding: 7 }}>{item.total_casos}</td>
+                          <td style={{ textAlign: 'right', padding: 7 }}>{item.porcentaje}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+
+                  <div style={{ marginTop: 24 }}>
+                    <h4 style={{ margin: '0 0 4px', fontSize: '0.95rem', color: '#0f172a' }}>
+                      Desagregado por tipo de enfermedad
+                    </h4>
+                    <p style={{ margin: '0 0 8px', fontSize: '0.78rem', color: '#64748b' }}>
+                      El porcentaje se calcula sobre el total de casos del año y la ciudad seleccionados.
+                    </p>
+                    {resumenEnfermedades.length === 0 ? (
+                      <p style={{ margin: 0, color: '#64748b', fontSize: '0.9rem' }}>
+                        No hay datos de tipos de enfermedad para los filtros seleccionados.
+                      </p>
+                    ) : (
+                      <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9rem' }}>
+                        <thead>
+                          <tr style={{ borderBottom: '2px solid #cbd5e1', color: '#475569' }}>
+                            <th style={{ textAlign: 'left', padding: 7 }}>Localidad</th>
+                            <th style={{ textAlign: 'left', padding: 7 }}>Departamento</th>
+                            <th style={{ textAlign: 'left', padding: 7 }}>Tipo de enfermedad</th>
+                            <th style={{ textAlign: 'right', padding: 7 }}>Casos</th>
+                            <th style={{ textAlign: 'right', padding: 7 }}>%</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {resumenEnfermedades.map((item, idx) => (
+                            <tr key={`${item.localidad}-${item.departamento}-${item.evento}-${idx}`} style={{ borderBottom: '1px solid #e2e8f0' }}>
+                              <td style={{ padding: 7 }}>{item.localidad}</td>
+                              <td style={{ padding: 7 }}>{item.departamento || '—'}</td>
+                              <td style={{ padding: 7 }}>{item.evento}</td>
+                              <td style={{ textAlign: 'right', padding: 7 }}>{item.total_casos}</td>
+                              <td style={{ textAlign: 'right', padding: 7 }}>{item.porcentaje}%</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              gap: 10,
+              padding: '10px 18px',
+              borderTop: '1px solid #e2e8f0',
+              fontSize: '0.8rem',
+              color: '#475569'
+            }}>
+              <span>Total: {resumenTotalCasos} casos</span>
+              <span>
+                {resumenFiltroAnio ? `Año ${resumenFiltroAnio}` : 'Todos los años'}
+                {' · '}
+                {resumenFiltroCiudad || 'Todas las ciudades'}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
