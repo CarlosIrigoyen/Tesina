@@ -13,6 +13,15 @@ from app.service import experimento_service, clustering_service, pdf_report_serv
 router = APIRouter()
 
 
+def _filtrar_por_localidad(df: pd.DataFrame, localidad: Optional[str]) -> pd.DataFrame:
+    """Filtra un DataFrame de casos por localidad (sin distinguir mayúsculas)."""
+    if not localidad or df.empty or "localidad" not in df.columns:
+        return df
+    objetivo = localidad.strip().lower()
+    mask = df["localidad"].astype(str).str.strip().str.lower() == objetivo
+    return df[mask].reset_index(drop=True)
+
+
 # ============================================================
 # UTILIDAD: verificar/crear índices necesarios para JOINs rápidos
 # ============================================================
@@ -91,21 +100,29 @@ async def get_casos_geojson(year: int = None, db: Session = Depends(get_db)):
 # CLUSTERS COMO POLÍGONOS (convex hull)
 # ============================================================
 @router.get("/clusters-poligonos")
-async def clusters_poligonos(db: Session = Depends(get_db)):
+async def clusters_poligonos(
+    localidad: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
     """
     Devuelve cada cluster ST-DBSCAN como un polígono (convex hull de sus puntos).
+    Si se indica una localidad, solo devuelve los clusters de esa ciudad.
     """
     from shapely.geometry import MultiPoint, mapping
 
-    query = text("""
+    query = """
         SELECT cluster_stdbscan,
                ARRAY_AGG(latitud) AS lats,
                ARRAY_AGG(longitud) AS lons
         FROM temp_exp_ets
         WHERE cluster_stdbscan IS NOT NULL AND cluster_stdbscan <> -1
-        GROUP BY cluster_stdbscan
-    """)
-    rows = db.execute(query).fetchall()
+    """
+    params = {}
+    if localidad:
+        query += " AND localidad ILIKE :loc"
+        params["loc"] = f"%{localidad.strip()}%"
+    query += " GROUP BY cluster_stdbscan"
+    rows = db.execute(text(query), params).fetchall()
 
     features = []
     for row in rows:
@@ -127,6 +144,60 @@ async def clusters_poligonos(db: Session = Depends(get_db)):
     return {"type": "FeatureCollection", "features": features}
 
 
+@router.get("/clusters-info")
+async def clusters_info(
+    localidad: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Resumen de cada cluster: casos, radios, localidades, eventos y período."""
+    query = """
+        SELECT cluster_stdbscan AS cluster_id,
+               COUNT(*) AS n_casos,
+               COUNT(DISTINCT radio_censal_id) AS n_radios,
+               COUNT(DISTINCT localidad) AS n_localidades,
+               COUNT(DISTINCT evento) AS n_eventos,
+               STRING_AGG(DISTINCT localidad, ', ' ORDER BY localidad) AS localidades,
+               STRING_AGG(DISTINCT evento, ', ' ORDER BY evento) AS eventos,
+               MIN(anio_epidemiologico) AS anio_min,
+               MAX(anio_epidemiologico) AS anio_max,
+               MIN(semana_epidemiologica) AS sem_min,
+               MAX(semana_epidemiologica) AS sem_max,
+               AVG(latitud) AS centro_lat,
+               AVG(longitud) AS centro_lon
+        FROM temp_exp_ets
+        WHERE cluster_stdbscan IS NOT NULL AND cluster_stdbscan <> -1
+    """
+    params = {}
+    if localidad:
+        query += " AND localidad ILIKE :loc"
+        params["loc"] = f"%{localidad.strip()}%"
+    query += " GROUP BY cluster_stdbscan ORDER BY cluster_stdbscan"
+    rows = db.execute(text(query), params).fetchall()
+    return [dict(r._mapping) for r in rows]
+
+
+@router.get("/cluster-casos/{cluster_id}")
+async def cluster_casos(
+    cluster_id: int,
+    localidad: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Casos que pertenecen a un cluster, con su tipo de enfermedad."""
+    query = """
+        SELECT id_caso, evento, radio_censal_id,
+               semana_epidemiologica, anio_epidemiologico,
+               localidad, departamento, latitud, longitud
+        FROM temp_exp_ets
+        WHERE cluster_stdbscan = :cid
+    """
+    params = {"cid": cluster_id}
+    if localidad:
+        query += " AND localidad ILIKE :loc"
+        params["loc"] = f"%{localidad.strip()}%"
+    query += " ORDER BY anio_epidemiologico, semana_epidemiologica, id_caso"
+    return [dict(r._mapping) for r in db.execute(text(query), params).fetchall()]
+
+
 # ============================================================
 # FLUJO 1: OPTICS → ST-DBSCAN (global)
 # ============================================================
@@ -135,9 +206,11 @@ async def flujo_clustering(
     min_samples: int = Query(5),
     max_eps_optics: float = Query(20.0),
     eps_temporal_semanas: int = Query(2),
+    localidad: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
     df = experimento_service.obtener_datos_completos_ets(db)
+    df = _filtrar_por_localidad(df, localidad).reset_index(drop=True)
     if df.empty:
         raise HTTPException(status_code=404, detail="No hay datos cargados.")
 
@@ -151,10 +224,24 @@ async def flujo_clustering(
 
     db.execute(text("ALTER TABLE temp_exp_ets ADD COLUMN IF NOT EXISTS cluster_stdbscan INT;"))
     db.commit()
+
+    # Al clusterizar solo una ciudad, desplazamos los IDs para no colisionar
+    # con los clusters ya guardados de otras ciudades.
+    offset = 0
+    if localidad:
+        row_max = db.execute(text("""
+            SELECT COALESCE(MAX(cluster_stdbscan) + 1, 0)
+            FROM temp_exp_ets
+            WHERE cluster_stdbscan IS NOT NULL AND cluster_stdbscan <> -1
+        """)).fetchone()
+        offset = int(row_max[0] or 0)
+
     for idx, row in df.iterrows():
+        label = res_stdbscan['labels'][idx]
+        db_label = -1 if label == -1 else label + offset
         db.execute(text("""
             UPDATE temp_exp_ets SET cluster_stdbscan = :cs WHERE id_caso = :id
-        """), {"cs": res_stdbscan['labels'][idx], "id": row['id_caso']})
+        """), {"cs": db_label, "id": row['id_caso']})
     db.commit()
 
     try:
@@ -190,6 +277,57 @@ async def flujo_clustering(
         db.rollback()
 
     return {"exploracion_optics": exploracion, "clustering_final": res_stdbscan}
+
+
+# ============================================================
+# NUEVO: ST-kNN espacio-temporal y comparativa
+# ============================================================
+@router.get("/flujo-clustering-stknn")
+async def flujo_clustering_stknn(
+    k: int = Query(6),
+    radio_espacial_km: float = Query(10.0),
+    radio_temporal_semanas: int = Query(3),
+    umbral_similaridad: float = Query(0.7),
+    localidad: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    df = experimento_service.obtener_datos_completos_ets(db)
+    df = _filtrar_por_localidad(df, localidad).reset_index(drop=True)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No hay datos cargados.")
+
+    res_stknn = clustering_service.ejecutar_st_knn(
+        df,
+        k=k,
+        radio_espacial_km=radio_espacial_km,
+        radio_temporal_semanas=radio_temporal_semanas,
+        umbral_similaridad=umbral_similaridad
+    )
+    metricas = clustering_service.calcular_metricas_clustering(df, res_stknn["labels"])
+    res_stknn["metricas"] = metricas
+    return res_stknn
+
+
+@router.get("/comparativa-clustering")
+async def comparativa_clustering(
+    min_samples: int = Query(5),
+    max_eps_optics: float = Query(20.0),
+    eps_temporal_semanas: int = Query(2),
+    localidad: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    df = experimento_service.obtener_datos_completos_ets(db)
+    df = _filtrar_por_localidad(df, localidad).reset_index(drop=True)
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No hay datos cargados.")
+
+    comparativa = clustering_service.comparar_algoritmos(
+        df,
+        min_samples=min_samples,
+        max_eps_optics=max_eps_optics,
+        eps_temporal_semanas=eps_temporal_semanas
+    )
+    return comparativa
 
 
 @router.get("/clustering-parametros")
@@ -624,15 +762,22 @@ async def exportar_pdf(payload: PDFRequest):
         raise HTTPException(status_code=500, detail=f"Error generando PDF: {str(e)}")
 
 @router.get("/cluster-radios/{cluster_id}")
-async def cluster_radios(cluster_id: int, db: Session = Depends(get_db)):
-    query = text("""
+async def cluster_radios(
+    cluster_id: int,
+    localidad: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    query = """
         SELECT radio_censal_id,
                MIN(localidad) AS localidad,
                COUNT(*) AS casos
         FROM temp_exp_ets
         WHERE cluster_stdbscan = :cid
           AND radio_censal_id IS NOT NULL
-        GROUP BY radio_censal_id
-        ORDER BY casos DESC;
-    """)
-    return [dict(r._mapping) for r in db.execute(query, {"cid": cluster_id}).fetchall()]
+    """
+    params = {"cid": cluster_id}
+    if localidad:
+        query += " AND localidad ILIKE :loc"
+        params["loc"] = f"%{localidad.strip()}%"
+    query += " GROUP BY radio_censal_id ORDER BY casos DESC"
+    return [dict(r._mapping) for r in db.execute(text(query), params).fetchall()]
