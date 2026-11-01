@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { Fragment, useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { MapContainer, TileLayer, GeoJSON, LayersControl, useMap } from 'react-leaflet';
 import axios from 'axios';
 import L from 'leaflet';
@@ -10,6 +10,28 @@ import { colorPorEvento } from '../utils/eventos';
 
 const { BaseLayer, Overlay } = LayersControl;
 const STORAGE_KEY = 'clustering_resultados_v5';
+const API = 'http://localhost:8000/api/v1/experimentos';
+
+const ETIQUETAS_INDICES = [
+  ['actividad', 'Actividad'],
+  ['carencias_sanitarias', 'Carencias sanitarias'],
+  ['demografia', 'Demografía'],
+  ['educacion', 'Educación'],
+  ['fuente_agua', 'Fuente de agua'],
+  ['infraestructuta', 'Infraestructura'],
+  ['salud', 'Salud'],
+  ['indice_compuesto', 'Índice compuesto']
+];
+
+const formatoPct = (v) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
+
+const leerGuardado = () => {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+};
 
 function CentrarEnCluster({ centro }) {
   const map = useMap();
@@ -78,11 +100,12 @@ function SeccionColapsable({
 }
 
 export default function VistaClustering({ radiosGeoJson }) {
-  const [minSamples, setMinSamples] = useState(5);
-  const [maxEpsOptics, setMaxEpsOptics] = useState(20);
-  const [epsTemporal, setEpsTemporal] = useState(2);
-  const [exploracion, setExploracion] = useState(null);
-  const [clustering, setClustering] = useState(null);
+  const guardadoInicial = useMemo(() => leerGuardado(), []);
+  const [minSamples, setMinSamples] = useState(guardadoInicial.minSamples ?? 5);
+  const [maxEpsOptics, setMaxEpsOptics] = useState(guardadoInicial.maxEpsOptics ?? 20);
+  const [epsTemporal, setEpsTemporal] = useState(guardadoInicial.epsTemporal ?? 2);
+  const [exploracion, setExploracion] = useState(guardadoInicial.exploracion ?? null);
+  const [clustering, setClustering] = useState(guardadoInicial.clustering ?? null);
   const [algoritmoActivo, setAlgoritmoActivo] = useState('stdbscan');
   const [resStknn, setResStknn] = useState(null);
   const [comparativa, setComparativa] = useState(null);
@@ -94,13 +117,16 @@ export default function VistaClustering({ radiosGeoJson }) {
   const [casosDelCluster, setCasosDelCluster] = useState([]);
   const [radiosDelCluster, setRadiosDelCluster] = useState([]);
   const [centroMapa, setCentroMapa] = useState(null);
+  const [radioDetalle, setRadioDetalle] = useState(null);
   const [loading, setLoading] = useState(false);
+  const indicesCache = useRef({});
   const [clustersVisibles, setClustersVisibles] = useState(new Set());
   const [mostrarHeatmap, setMostrarHeatmap] = useState(false);
   const [mostrarAnimacion, setMostrarAnimacion] = useState(false);
   const [filtroCiudad, setFiltroCiudad] = useState('');
+  const [eventoSeleccionado, setEventoSeleccionado] = useState(null);
 
-  const cargarTodo = async (localidad = filtroCiudad) => {
+  const cargarTodo = useCallback(async (localidad = '') => {
     try {
       const cityQuery = localidad ? `?localidad=${encodeURIComponent(localidad)}` : '';
       const [resCasos, resPoligonos, resInfo] = await Promise.all([
@@ -117,24 +143,11 @@ export default function VistaClustering({ radiosGeoJson }) {
     } catch (e) {
       console.error('Error cargando datos:', e);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    try {
-      const g = localStorage.getItem(STORAGE_KEY);
-      if (g) {
-        const data = JSON.parse(g);
-        if (data.exploracion) setExploracion(data.exploracion);
-        if (data.clustering) setClustering(data.clustering);
-        if (data.minSamples !== undefined) setMinSamples(data.minSamples);
-        if (data.maxEpsOptics !== undefined) setMaxEpsOptics(data.maxEpsOptics);
-        if (data.epsTemporal !== undefined) setEpsTemporal(data.epsTemporal);
-      }
-    } catch {
-      // Sin datos guardados o JSON inválido: se continúa con valores por defecto.
-    }
-    cargarTodo();
-  }, []);
+    void (async () => { await cargarTodo(); })();
+  }, [cargarTodo]);
 
   const ejecutar = async () => {
     setLoading(true);
@@ -153,7 +166,7 @@ export default function VistaClustering({ radiosGeoJson }) {
       setExploracion(res.data.exploracion_optics);
       setClustering(res.data.clustering_final);
       setAlgoritmoActivo('stdbscan');
-      await cargarTodo();
+      await cargarTodo(filtroCiudad);
       localStorage.setItem(STORAGE_KEY, JSON.stringify({
         exploracion: res.data.exploracion_optics,
         clustering: res.data.clustering_final,
@@ -217,8 +230,18 @@ export default function VistaClustering({ radiosGeoJson }) {
     }
   };
 
+  const limpiarDetalleCluster = () => {
+    setClusterSeleccionado(null);
+    setCasosDelCluster([]);
+    setRadiosDelCluster([]);
+    setRadioDetalle(null);
+    setCentroMapa(null);
+  };
+
   const seleccionarCluster = async (cluster) => {
     setClusterSeleccionado(cluster);
+    setClustersVisibles(prev => new Set(prev).add(cluster.cluster_id));
+    setRadioDetalle(null);
     if (cluster && cluster.centro_lat && cluster.centro_lon) {
       setCentroMapa([parseFloat(cluster.centro_lat), parseFloat(cluster.centro_lon)]);
     }
@@ -230,16 +253,26 @@ export default function VistaClustering({ radiosGeoJson }) {
       ]);
       setCasosDelCluster(resCasos.data);
       setRadiosDelCluster(resRadios.data);
+      setRadioDetalle(resRadios.data[0] ?? null);
     } catch (e) {
       console.error(e);
     }
   };
 
+  const cerrarCluster = () => {
+    limpiarDetalleCluster();
+  };
+
   const toggleCluster = (id) => {
-    const nuevo = new Set(clustersVisibles);
-    if (nuevo.has(id)) nuevo.delete(id);
-    else nuevo.add(id);
-    setClustersVisibles(nuevo);
+    if (clustersVisibles.has(id)) {
+      const nuevo = new Set(clustersVisibles);
+      nuevo.delete(id);
+      setClustersVisibles(nuevo);
+      if (clusterSeleccionado?.cluster_id === id) limpiarDetalleCluster();
+      return;
+    }
+    const cluster = clustersInfo.find(c => c.cluster_id === id);
+    if (cluster) seleccionarCluster(cluster);
   };
 
   const toggleTodos = (visible) => {
@@ -247,6 +280,7 @@ export default function VistaClustering({ radiosGeoJson }) {
       setClustersVisibles(new Set(clustersInfo.map(c => c.cluster_id)));
     } else {
       setClustersVisibles(new Set());
+      limpiarDetalleCluster();
     }
   };
 
@@ -262,8 +296,10 @@ export default function VistaClustering({ radiosGeoJson }) {
     setClusterSeleccionado(null);
     setCasosDelCluster([]);
     setRadiosDelCluster([]);
+    setRadioDetalle(null);
     setClustersVisibles(new Set());
     setFiltroCiudad('');
+    setEventoSeleccionado(null);
     cargarTodo('');
   };
 
@@ -294,21 +330,6 @@ export default function VistaClustering({ radiosGeoJson }) {
     };
   }, [casosGeoJson, filtroCiudad]);
 
-  // Radios censales de la ciudad seleccionada
-  const radiosMostrados = useMemo(() => {
-    if (!filtroCiudad || !radiosGeoJson) return radiosGeoJson;
-    const ids = new Set(
-      (casosCiudad?.features || [])
-        .map(f => f.properties?.radio_censal_id)
-        .filter(Boolean)
-        .map(String)
-    );
-    return {
-      ...radiosGeoJson,
-      features: radiosGeoJson.features.filter(f => ids.has(String(f.properties?.link ?? '')))
-    };
-  }, [radiosGeoJson, casosCiudad, filtroCiudad]);
-
   const enfermedadesResumen = useMemo(() => {
     const mapa = new Map();
     (casosCiudad?.features || []).forEach(f => {
@@ -320,34 +341,83 @@ export default function VistaClustering({ radiosGeoJson }) {
       .sort((a, b) => b.casos - a.casos || a.evento.localeCompare(b.evento, 'es'));
   }, [casosCiudad]);
 
-  // Filtrar polígonos y puntos según visibilidad
+  // Casos y clusters que contienen el evento seleccionado
+  const casosPorEvento = useMemo(() => {
+    if (!casosCiudad) return null;
+    if (!eventoSeleccionado) return casosCiudad;
+    return {
+      ...casosCiudad,
+      features: casosCiudad.features.filter(f => f.properties?.evento === eventoSeleccionado)
+    };
+  }, [casosCiudad, eventoSeleccionado]);
+
+  const clustersConEvento = useMemo(() => {
+    const ids = new Set();
+    (casosPorEvento?.features || []).forEach(f => {
+      const c = f.properties?.cluster_stdbscan;
+      if (c !== null && c !== undefined && c !== -1) ids.add(c);
+    });
+    return ids;
+  }, [casosPorEvento]);
+
+  const clustersInfoVisibles = useMemo(() => {
+    if (!eventoSeleccionado) return clustersInfo;
+    return clustersInfo.filter(c => clustersConEvento.has(c.cluster_id));
+  }, [clustersInfo, clustersConEvento, eventoSeleccionado]);
+
+  // Filtrar polígonos y puntos según evento y visibilidad (checks del panel)
   const poligonosFiltrados = useMemo(() => {
     if (!clustersPoligonos) return null;
     return {
       type: 'FeatureCollection',
-      features: clustersPoligonos.features.filter(f => clustersVisibles.has(f.properties.cluster))
+      features: clustersPoligonos.features.filter(f => {
+        const id = f.properties.cluster;
+        if (eventoSeleccionado && !clustersConEvento.has(id)) return false;
+        return clustersVisibles.has(id);
+      })
     };
-  }, [clustersPoligonos, clustersVisibles]);
+  }, [clustersPoligonos, clustersVisibles, eventoSeleccionado, clustersConEvento]);
 
   const casosFiltrados = useMemo(() => {
     if (!casosCiudad) return null;
     return {
       type: 'FeatureCollection',
       features: casosCiudad.features.filter(f => {
+        if (eventoSeleccionado && f.properties?.evento !== eventoSeleccionado) return false;
         const c = f.properties.cluster_stdbscan;
+        if ((clusterSeleccionado || clustersVisibles.size !== clustersInfo.length) && (c === null || c === -1)) return false;
         return c === null || c === -1 || clustersVisibles.has(c);
       })
     };
-  }, [casosCiudad, clustersVisibles]);
+  }, [casosCiudad, clustersVisibles, clustersInfo.length, clusterSeleccionado, eventoSeleccionado]);
+
+  // Radios censales visibles: de la ciudad o del cluster seleccionado
+  const radiosMostrados = useMemo(() => {
+    if (!radiosGeoJson) return null;
+    const usarFiltrados = filtroCiudad || clusterSeleccionado || eventoSeleccionado
+      || clustersVisibles.size !== clustersInfo.length;
+    const fuente = usarFiltrados ? casosFiltrados : null;
+    if (!fuente) return radiosGeoJson;
+    const ids = new Set(
+      (fuente.features || [])
+        .map(f => f.properties?.radio_censal_id)
+        .filter(Boolean)
+        .map(String)
+    );
+    return {
+      ...radiosGeoJson,
+      features: radiosGeoJson.features.filter(f => ids.has(String(f.properties?.link ?? '')))
+    };
+  }, [radiosGeoJson, casosFiltrados, filtroCiudad, clusterSeleccionado, eventoSeleccionado, clustersVisibles, clustersInfo.length]);
 
   const puntosHeatmap = useMemo(() => {
-    if (!casosCiudad) return [];
-    return casosCiudad.features.map(f => [
+    if (!casosFiltrados) return [];
+    return casosFiltrados.features.map(f => [
       f.geometry.coordinates[1],
       f.geometry.coordinates[0],
       1
     ]);
-  }, [casosCiudad]);
+  }, [casosFiltrados]);
 
   const enfermedadesCluster = useMemo(() => {
     if (!clusterSeleccionado || !casosCiudad) return [];
@@ -362,6 +432,12 @@ export default function VistaClustering({ radiosGeoJson }) {
       .map(([evento, casos]) => ({ evento, casos }))
       .sort((a, b) => b.casos - a.casos || a.evento.localeCompare(b.evento, 'es'));
   }, [clusterSeleccionado, casosCiudad]);
+
+  const casosDelClusterFiltrados = useMemo(() => (
+    eventoSeleccionado
+      ? casosDelCluster.filter(c => c.evento === eventoSeleccionado)
+      : casosDelCluster
+  ), [casosDelCluster, eventoSeleccionado]);
 
   const pointToLayer = (feature, latlng) => {
     const c = feature.properties.cluster_stdbscan;
@@ -390,6 +466,58 @@ export default function VistaClustering({ radiosGeoJson }) {
     `);
   };
 
+  const cargarIndicesRadio = async (link) => {
+    if (indicesCache.current[link] !== undefined) return indicesCache.current[link];
+    try {
+      const res = await axios.get(`${API}/radio-indices/${encodeURIComponent(link)}`);
+      indicesCache.current[link] = res.data;
+      return res.data;
+    } catch (e) {
+      console.error('Error cargando índices del radio:', e);
+      return null;
+    }
+  };
+
+  const seleccionarRadio = async (link) => {
+    const existente = radiosDelCluster.find(
+      r => String(r.link ?? r.radio_censal_id) === link
+    );
+    if (existente) {
+      setRadioDetalle(existente);
+      return;
+    }
+    const data = await cargarIndicesRadio(link);
+    if (data) setRadioDetalle({ ...data, ...(data.indices || {}), radio_censal_id: data.link });
+  };
+
+  const onEachRadio = (f, layer) => {
+    const link = String(f.properties?.link ?? '');
+    layer.on('click', () => { seleccionarRadio(link); });
+  };
+
+  const estiloRadio = () => {
+    if (clusterSeleccionado) {
+      return { color: '#7c3aed', weight: 1.6, fillColor: '#8b5cf6', fillOpacity: 0.22 };
+    }
+    return { color: '#1d4ed8', weight: 1, fillOpacity: 0.08 };
+  };
+
+  const contenidoIndicesRadio = (radio) => (
+    <>
+      <p style={{ fontSize: 11, margin: '4px 0' }}>
+        <b>Localidad:</b> {radio.localidad || '—'} · <b>Casos:</b> {radio.casos ?? 0}
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '3px 10px', fontSize: 10 }}>
+        {ETIQUETAS_INDICES.map(([clave, etiqueta]) => (
+          <Fragment key={clave}>
+            <span style={{ color: '#475569' }}>{etiqueta}</span>
+            <b style={{ textAlign: 'right' }}>{formatoPct(radio[clave])}</b>
+          </Fragment>
+        ))}
+      </div>
+    </>
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Barra superior */}
@@ -409,10 +537,12 @@ export default function VistaClustering({ radiosGeoJson }) {
               setClusterSeleccionado(null);
               setCasosDelCluster([]);
               setRadiosDelCluster([]);
+              setRadioDetalle(null);
               setCentroMapa(null);
               setClustersPoligonos(null);
               setClustersInfo([]);
               setClustersVisibles(new Set());
+              setEventoSeleccionado(null);
               cargarTodo(valor);
             }}
             style={{ padding: '5px 6px', borderRadius: 4, minWidth: 160 }}
@@ -423,6 +553,20 @@ export default function VistaClustering({ radiosGeoJson }) {
             ))}
           </select>
         </label>
+        {eventoSeleccionado && (
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            background: colorPorEvento(eventoSeleccionado), color: '#111827',
+            padding: '3px 8px', borderRadius: 999, fontSize: 12, fontWeight: 'bold'
+          }}>
+            {eventoSeleccionado}
+            <button
+              onClick={() => setEventoSeleccionado(null)}
+              aria-label="Quitar filtro de evento"
+              style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontWeight: 'bold' }}
+            >×</button>
+          </span>
+        )}
         <button onClick={ejecutar} disabled={loading} style={{
           background: '#7c3aed', color: 'white', border: 'none',
           padding: '6px 12px', borderRadius: 4, cursor: 'pointer'
@@ -462,12 +606,13 @@ export default function VistaClustering({ radiosGeoJson }) {
               </BaseLayer>
               <BaseLayer name="Sin Mapa Base"><TileLayer url="" /></BaseLayer>
 
-              <Overlay checked name="Radios Censales">
+              <Overlay checked name={clusterSeleccionado ? 'Radios del cluster' : 'Radios Censales'}>
                 {radiosMostrados && (
                   <GeoJSON
-                    key={`radios-${filtroCiudad || 'todas'}`}
+                    key={`radios-${filtroCiudad || 'todas'}-${clusterSeleccionado?.cluster_id || 'all'}-${eventoSeleccionado || 'todos'}`}
                     data={radiosMostrados}
-                    style={{ color: '#1d4ed8', weight: 1, fillOpacity: 0.08 }}
+                    style={estiloRadio}
+                    onEachFeature={onEachRadio}
                   />
                 )}
               </Overlay>
@@ -483,7 +628,7 @@ export default function VistaClustering({ radiosGeoJson }) {
               <Overlay checked name="Áreas de Clusters (convex hull)">
                 {poligonosFiltrados && poligonosFiltrados.features.length > 0 && (
                   <GeoJSON
-                    key={JSON.stringify(Array.from(clustersVisibles))}
+                    key={`${JSON.stringify(Array.from(clustersVisibles))}-${clusterSeleccionado?.cluster_id || 'all'}-${eventoSeleccionado || 'todos'}`}
                     data={poligonosFiltrados}
                     style={(feature) => ({
                       color: colorCluster(feature.properties.cluster),
@@ -503,7 +648,6 @@ export default function VistaClustering({ radiosGeoJson }) {
                           Radios: ${info.n_radios}` : ''}
                         </div>
                       `);
-                      l.on('click', () => info && seleccionarCluster(info));
                     }}
                   />
                 )}
@@ -512,7 +656,7 @@ export default function VistaClustering({ radiosGeoJson }) {
               <Overlay checked name="Puntos de Clusters">
                 {casosFiltrados && (
                   <GeoJSON
-                    key={`puntos-${filtroCiudad || 'todas'}-${clusterSeleccionado?.cluster_id || 'all'}-${clustersVisibles.size}-${casosFiltrados.features.length}`}
+                    key={`puntos-${filtroCiudad || 'todas'}-${clusterSeleccionado?.cluster_id || 'all'}-${eventoSeleccionado || 'todos'}-${clustersVisibles.size}-${casosFiltrados.features.length}`}
                     data={casosFiltrados}
                     pointToLayer={pointToLayer}
                     onEachFeature={onEachFeatureCaso}
@@ -538,18 +682,37 @@ export default function VistaClustering({ radiosGeoJson }) {
           {enfermedadesResumen.length > 0 && (
             <SeccionColapsable
               titulo={`Enfermedades (${enfermedadesResumen.length})${filtroCiudad ? ` · ${filtroCiudad}` : ''}`}
+              extra={eventoSeleccionado ? (
+                <button
+                  onClick={() => setEventoSeleccionado(null)}
+                  style={{ background: '#e2e8f0', border: 'none', padding: '2px 6px', borderRadius: 3, cursor: 'pointer', fontSize: 11 }}
+                >Todas</button>
+              ) : null}
             >
               <div style={{ maxHeight: 190, overflowY: 'auto' }}>
-                {enfermedadesResumen.map(({ evento, casos }) => (
-                  <div key={evento} style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '4px 0', borderBottom: '1px solid #f1f5f9', fontSize: 12 }}>
-                    <span style={{
-                      width: 11, height: 11, borderRadius: '50%',
-                      background: colorPorEvento(evento), border: '1px solid #111827', flexShrink: 0
-                    }} />
-                    <span style={{ flex: 1 }}>{evento}</span>
-                    <b>{casos}</b>
-                  </div>
-                ))}
+                {enfermedadesResumen.map(({ evento, casos }) => {
+                  const activo = eventoSeleccionado === evento;
+                  return (
+                    <div
+                      key={evento}
+                      onClick={() => setEventoSeleccionado(activo ? null : evento)}
+                      title={activo ? 'Quitar filtro de evento' : 'Filtrar el mapa por este evento'}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 7, padding: '4px 4px',
+                        borderBottom: '1px solid #f1f5f9', fontSize: 12,
+                        cursor: 'pointer', background: activo ? '#e0e7ff' : 'transparent',
+                        fontWeight: activo ? 'bold' : 'normal'
+                      }}
+                    >
+                      <span style={{
+                        width: 11, height: 11, borderRadius: '50%',
+                        background: colorPorEvento(evento), border: '1px solid #111827', flexShrink: 0
+                      }} />
+                      <span style={{ flex: 1 }}>{evento}</span>
+                      <b>{casos}</b>
+                    </div>
+                  );
+                })}
               </div>
             </SeccionColapsable>
           )}
@@ -658,7 +821,7 @@ export default function VistaClustering({ radiosGeoJson }) {
 
           {clustersInfo.length > 0 && (
             <SeccionColapsable
-              titulo={`Clusters (${clustersInfo.length})`}
+              titulo={`Clusters (${clustersInfoVisibles.length}${eventoSeleccionado ? ` de ${clustersInfo.length}` : ''})`}
               extra={(
                 <div style={{ fontSize: 11 }}>
                   <button onClick={() => toggleTodos(true)} style={{ background: '#e2e8f0', border: 'none', padding: '2px 6px', borderRadius: 3, cursor: 'pointer', marginRight: 4 }}>Todos</button>
@@ -666,136 +829,202 @@ export default function VistaClustering({ radiosGeoJson }) {
                 </div>
               )}
             >
-              <div style={{ maxHeight: 250, overflowY: 'auto' }}>
-                {clustersInfo.map((c) => (
-                  <div key={c.cluster_id} style={{
-                    display: 'flex', alignItems: 'center', gap: 6, padding: 6,
-                    borderBottom: '1px solid #f1f5f9',
-                    background: clusterSeleccionado?.cluster_id === c.cluster_id ? '#e0e7ff' : 'transparent'
-                  }}>
-                    <input
-                      type="checkbox"
-                      checked={clustersVisibles.has(c.cluster_id)}
-                      onChange={() => toggleCluster(c.cluster_id)}
-                    />
-                    <div
-                      onClick={() => seleccionarCluster(c)}
-                      style={{
-                        flex: 1, cursor: 'pointer', paddingLeft: 4,
-                        borderLeft: `4px solid ${colorCluster(c.cluster_id)}`,
-                        fontSize: 12
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                        <b>Cluster {c.cluster_id}</b>
-                        <span>{c.n_casos} casos</span>
+              <div style={{ maxHeight: 600, overflowY: 'auto' }}>
+                {clustersInfoVisibles.map((c) => {
+                  const seleccionado = clusterSeleccionado?.cluster_id === c.cluster_id;
+                  return (
+                    <Fragment key={c.cluster_id}>
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 6, padding: 6,
+                        borderBottom: '1px solid #f1f5f9',
+                        background: seleccionado ? '#e0e7ff' : 'transparent'
+                      }}>
+                        <input
+                          type="checkbox"
+                          checked={clustersVisibles.has(c.cluster_id)}
+                          onChange={() => toggleCluster(c.cluster_id)}
+                        />
+                        <div
+                          onClick={() => seleccionarCluster(c)}
+                          style={{
+                            flex: 1, cursor: 'pointer', paddingLeft: 4,
+                            borderLeft: `4px solid ${colorCluster(c.cluster_id)}`,
+                            fontSize: 12
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                            <b>Cluster {c.cluster_id}</b>
+                            <span>{c.n_casos} casos</span>
+                          </div>
+                          <div style={{ color: '#64748b', fontSize: 10, marginTop: 2 }}>
+                            {c.localidades} · {c.anio_min}-{c.anio_max}
+                          </div>
+                        </div>
                       </div>
-                      <div style={{ color: '#64748b', fontSize: 10, marginTop: 2 }}>
-                        {c.localidades} · {c.anio_min}-{c.anio_max}
-                      </div>
-                    </div>
-                  </div>
-                ))}
+
+                      {seleccionado && (
+                        <div style={{
+                          background: '#eef2ff', border: '1px solid #6366f1',
+                          borderRadius: 6, padding: 10, margin: '2px 0 10px 20px'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                            <b style={{ fontSize: 12 }}>Detalle del cluster {c.cluster_id}</b>
+                            <button
+                              onClick={cerrarCluster}
+                              aria-label="Cerrar detalle del cluster"
+                              style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '1.1rem' }}
+                            >×</button>
+                          </div>
+                          <p style={{ fontSize: 11, margin: '4px 0' }}>
+                            <b>{c.n_casos} casos</b> en {c.n_radios} radios ·{' '}
+                            {c.n_localidades} localidad(es) · {c.n_eventos} evento(s)
+                          </p>
+                          <p style={{ fontSize: 10, margin: '2px 0' }}>
+                            <b>Período:</b> {c.anio_min}-{c.anio_max}, sem {c.sem_min}-{c.sem_max}
+                          </p>
+                          <p style={{ fontSize: 10, margin: '2px 0' }}>
+                            <b>Eventos:</b> {c.eventos}
+                          </p>
+
+                          {enfermedadesCluster.length > 0 && (
+                            <>
+                              <h5 style={{ margin: '8px 0 3px', fontSize: 11 }}>Enfermedades</h5>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                {enfermedadesCluster.map(({ evento, casos }) => {
+                                  const activo = eventoSeleccionado === evento;
+                                  return (
+                                    <div
+                                      key={evento}
+                                      onClick={() => setEventoSeleccionado(activo ? null : evento)}
+                                      title={activo ? 'Quitar filtro de evento' : 'Filtrar el mapa por este evento'}
+                                      style={{
+                                        display: 'flex', alignItems: 'center', gap: 6, fontSize: 10,
+                                        cursor: 'pointer', padding: '1px 3px', borderRadius: 4,
+                                        background: activo ? '#c7d2fe' : 'transparent',
+                                        fontWeight: activo ? 'bold' : 'normal'
+                                      }}
+                                    >
+                                      <span style={{
+                                        width: 9, height: 9, borderRadius: '50%',
+                                        background: colorPorEvento(evento), border: '1px solid #111827', flexShrink: 0
+                                      }} />
+                                      <span style={{ flex: 1 }}>{evento}</span>
+                                      <b>{casos}</b>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </>
+                          )}
+
+                          {radiosDelCluster.length > 0 && (
+                            <>
+                              <h5 style={{ margin: '8px 0 3px', fontSize: 11 }}>
+                                Radios del cluster
+                                <span style={{ fontWeight: 'normal', color: '#64748b' }}> · índices visibles abajo</span>
+                              </h5>
+                              <div style={{ maxHeight: 140, overflowY: 'auto' }}>
+                                <table style={{ width: '100%', fontSize: 10, background: 'white', borderCollapse: 'collapse' }}>
+                                  <thead style={{ background: '#1e293b', color: 'white', position: 'sticky', top: 0 }}>
+                                    <tr>
+                                      <th style={{ padding: 3, textAlign: 'left' }}>Radio</th>
+                                      <th style={{ padding: 3, textAlign: 'right' }}>Casos</th>
+                                      <th style={{ padding: 3, textAlign: 'right' }}>Carencias</th>
+                                      <th style={{ padding: 3, textAlign: 'right' }}>Índice</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {radiosDelCluster.map((r) => {
+                                      const link = r.link ?? r.radio_censal_id;
+                                      const activo = (radioDetalle?.link ?? radioDetalle?.radio_censal_id) === link;
+                                      return (
+                                        <tr
+                                          key={link}
+                                          onClick={() => setRadioDetalle(r)}
+                                          style={{
+                                            borderBottom: '1px solid #f1f5f9',
+                                            cursor: 'pointer',
+                                            background: activo ? '#e0e7ff' : 'transparent'
+                                          }}
+                                        >
+                                          <td style={{ padding: 3, fontFamily: 'monospace' }}>{link}</td>
+                                          <td style={{ padding: 3, textAlign: 'right', fontWeight: 'bold' }}>{r.casos}</td>
+                                          <td style={{ padding: 3, textAlign: 'right' }}>{formatoPct(r.carencias_sanitarias)}</td>
+                                          <td style={{ padding: 3, textAlign: 'right' }}>{formatoPct(r.indice_compuesto)}</td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+
+                              {radioDetalle && (
+                                <div style={{
+                                  marginTop: 6, padding: 8, borderRadius: 6,
+                                  background: 'white', border: '1px solid #0ea5e9'
+                                }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <b style={{ fontSize: 11 }}>Índices del radio {radioDetalle.link ?? radioDetalle.radio_censal_id}</b>
+                                    <button
+                                      onClick={() => setRadioDetalle(null)}
+                                      aria-label="Cerrar índices del radio"
+                                      style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 13 }}
+                                    >×</button>
+                                  </div>
+                                  {contenidoIndicesRadio(radioDetalle)}
+                                </div>
+                              )}
+                            </>
+                          )}
+
+                          <h5 style={{ margin: '8px 0 3px', fontSize: 11 }}>Casos ({casosDelClusterFiltrados.length})</h5>
+                          <div style={{ maxHeight: 180, overflowY: 'auto' }}>
+                            <table style={{ width: '100%', fontSize: 10, background: 'white', borderCollapse: 'collapse' }}>
+                              <thead style={{ background: '#1e293b', color: 'white', position: 'sticky', top: 0 }}>
+                                <tr>
+                                  <th style={{ padding: 3, textAlign: 'left' }}>ID</th>
+                                  <th style={{ padding: 3, textAlign: 'left' }}>Evento</th>
+                                  <th style={{ padding: 3, textAlign: 'left' }}>Radio</th>
+                                  <th style={{ padding: 3, textAlign: 'left' }}>Sem</th>
+                                  <th style={{ padding: 3, textAlign: 'left' }}>Año</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {casosDelClusterFiltrados.map((caso, i) => (
+                                  <tr key={caso.id_caso} style={{ background: i % 2 ? '#f8fafc' : 'white', borderBottom: '1px solid #f1f5f9' }}>
+                                    <td style={{ padding: 3 }}>{caso.id_caso}</td>
+                                    <td style={{ padding: 3 }}>{caso.evento}</td>
+                                    <td style={{ padding: 3, fontFamily: 'monospace' }}>{caso.radio_censal_id}</td>
+                                    <td style={{ padding: 3 }}>{caso.semana_epidemiologica}</td>
+                                    <td style={{ padding: 3 }}>{caso.anio_epidemiologico}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </div>
             </SeccionColapsable>
           )}
 
-          {clusterSeleccionado && (
+          {radioDetalle && !clusterSeleccionado && (
             <SeccionColapsable
-              titulo={`Detalle Cluster ${clusterSeleccionado.cluster_id}`}
-              border="2px solid #6366f1"
-              background="#eef2ff"
+              titulo={`Radio ${radioDetalle.link ?? radioDetalle.radio_censal_id}`}
+              border="2px solid #0ea5e9"
+              background="#f0f9ff"
               extra={(
                 <button
-                  onClick={() => { setClusterSeleccionado(null); setCasosDelCluster([]); setRadiosDelCluster([]); setCentroMapa(null); }}
-                  aria-label="Cerrar detalle del cluster"
+                  onClick={() => setRadioDetalle(null)}
+                  aria-label="Cerrar información del radio"
                   style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '1.2rem' }}
                 >×</button>
               )}
             >
-              <p style={{ fontSize: 12 }}>
-                <b>{clusterSeleccionado.n_casos} casos</b> en {clusterSeleccionado.n_radios} radios ·{' '}
-                {clusterSeleccionado.n_localidades} localidad(es) · {clusterSeleccionado.n_eventos} evento(s)
-              </p>
-              <p style={{ fontSize: 11 }}>
-                <b>Período:</b> {clusterSeleccionado.anio_min}-{clusterSeleccionado.anio_max}, sem {clusterSeleccionado.sem_min}-{clusterSeleccionado.sem_max}
-              </p>
-              <p style={{ fontSize: 11 }}>
-                <b>Eventos:</b> {clusterSeleccionado.eventos}
-              </p>
-
-              {/* Enfermedades del cluster */}
-              {enfermedadesCluster.length > 0 && (
-                <>
-                  <h5 style={{ marginTop: 10, marginBottom: 4, fontSize: 12 }}>Enfermedades</h5>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                    {enfermedadesCluster.map(({ evento, casos }) => (
-                      <div key={evento} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
-                        <span style={{
-                          width: 10, height: 10, borderRadius: '50%',
-                          background: colorPorEvento(evento), border: '1px solid #111827', flexShrink: 0
-                        }} />
-                        <span style={{ flex: 1 }}>{evento}</span>
-                        <b>{casos}</b>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {/* Radios del cluster */}
-              {radiosDelCluster.length > 0 && (
-                <>
-                  <h5 style={{ marginTop: 10, marginBottom: 4, fontSize: 12 }}>Radios del cluster</h5>
-                  <div style={{ maxHeight: 120, overflowY: 'auto' }}>
-                    <table style={{ width: '100%', fontSize: 10, background: 'white', borderCollapse: 'collapse' }}>
-                      <thead style={{ background: '#1e293b', color: 'white' }}>
-                        <tr>
-                          <th style={{ padding: 3, textAlign: 'left' }}>Radio</th>
-                          <th style={{ padding: 3, textAlign: 'right' }}>Casos</th>
-                          <th style={{ padding: 3, textAlign: 'right' }}>Carencias</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {radiosDelCluster.map((r) => (
-                          <tr key={r.link ?? r.radio_censal_id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                            <td style={{ padding: 3, fontFamily: 'monospace' }}>{r.link ?? r.radio_censal_id}</td>
-                            <td style={{ padding: 3, textAlign: 'right', fontWeight: 'bold' }}>{r.casos}</td>
-                            <td style={{ padding: 3, textAlign: 'right' }}>{r.carencias_sanitarias ? `${(r.carencias_sanitarias * 100).toFixed(1)}%` : '—'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-
-              {/* Casos del cluster */}
-              <h5 style={{ marginTop: 10, marginBottom: 4, fontSize: 12 }}>Casos ({casosDelCluster.length})</h5>
-              <div style={{ maxHeight: 200, overflowY: 'auto' }}>
-                <table style={{ width: '100%', fontSize: 10, background: 'white', borderCollapse: 'collapse' }}>
-                  <thead style={{ background: '#1e293b', color: 'white', position: 'sticky', top: 0 }}>
-                    <tr>
-                      <th style={{ padding: 3, textAlign: 'left' }}>ID</th>
-                      <th style={{ padding: 3, textAlign: 'left' }}>Evento</th>
-                      <th style={{ padding: 3, textAlign: 'left' }}>Radio</th>
-                      <th style={{ padding: 3, textAlign: 'left' }}>Sem</th>
-                      <th style={{ padding: 3, textAlign: 'left' }}>Año</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {casosDelCluster.map((c, i) => (
-                      <tr key={c.id_caso} style={{ background: i % 2 ? '#f8fafc' : 'white', borderBottom: '1px solid #f1f5f9' }}>
-                        <td style={{ padding: 3 }}>{c.id_caso}</td>
-                        <td style={{ padding: 3 }}>{c.evento}</td>
-                        <td style={{ padding: 3, fontFamily: 'monospace' }}>{c.radio_censal_id}</td>
-                        <td style={{ padding: 3 }}>{c.semana_epidemiologica}</td>
-                        <td style={{ padding: 3 }}>{c.anio_epidemiologico}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              {contenidoIndicesRadio(radioDetalle)}
             </SeccionColapsable>
           )}
         </div>

@@ -768,16 +768,57 @@ async def cluster_radios(
     db: Session = Depends(get_db)
 ):
     query = """
-        SELECT radio_censal_id,
-               MIN(localidad) AS localidad,
-               COUNT(*) AS casos
-        FROM temp_exp_ets
-        WHERE cluster_stdbscan = :cid
-          AND radio_censal_id IS NOT NULL
+        WITH agregados AS (
+            SELECT radio_censal_id,
+                   MIN(localidad) AS localidad,
+                   COUNT(*) AS casos
+            FROM temp_exp_ets
+            WHERE cluster_stdbscan = :cid
+              AND radio_censal_id IS NOT NULL
     """
     params = {"cid": cluster_id}
     if localidad:
         query += " AND localidad ILIKE :loc"
         params["loc"] = f"%{localidad.strip()}%"
-    query += " GROUP BY radio_censal_id ORDER BY casos DESC"
+    query += """
+            GROUP BY radio_censal_id
+        )
+        SELECT a.radio_censal_id AS link,
+               a.radio_censal_id,
+               a.localidad,
+               a.casos,
+               i.actividad, i.carencias_sanitarias, i.demografia,
+               i.educacion, i.fuente_agua, i.infraestructuta,
+               i.salud, i.indice_compuesto
+        FROM agregados a
+        LEFT JOIN indices_radios i ON a.radio_censal_id = i.link
+        ORDER BY a.casos DESC
+    """
     return [dict(r._mapping) for r in db.execute(text(query), params).fetchall()]
+
+
+@router.get("/radio-indices/{link}")
+async def radio_indices(link: str, db: Session = Depends(get_db)):
+    """Índices sociodemográficos y casos de un radio censal."""
+    query = text("""
+        SELECT :link AS link,
+               (SELECT MIN(localidad) FROM temp_exp_ets WHERE radio_censal_id = :link) AS localidad,
+               (SELECT COUNT(*) FROM temp_exp_ets WHERE radio_censal_id = :link) AS casos,
+               i.actividad, i.carencias_sanitarias, i.demografia,
+               i.educacion, i.fuente_agua, i.infraestructuta,
+               i.salud, i.indice_compuesto
+        FROM (SELECT 1) dummy
+        LEFT JOIN indices_radios i ON i.link = :link
+    """)
+    row = db.execute(query, {"link": link}).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No se encontró el radio '{link}'")
+    data = dict(row._mapping)
+    indices = {
+        clave: data.pop(clave)
+        for clave in [
+            "actividad", "carencias_sanitarias", "demografia", "educacion",
+            "fuente_agua", "infraestructuta", "salud", "indice_compuesto"
+        ]
+    }
+    return {**data, "indices": indices}
