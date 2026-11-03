@@ -8,6 +8,7 @@ import VistaClustering from './components/VistaClustering';
 import VistaSaTScan from './components/VistaSaTScan';
 import PanelIndices from './components/PanelIndices';
 import VistaPorCiudad from './components/VistaPorCiudad';
+import VistaEstadisticas from './components/VistaEstadisticas';
 import HeatmapLayer from './components/HeatmapLayer';
 import HeatmapFrame from './components/HeatmapFrame';
 import PanelTemporal from './components/PanelTemporal';
@@ -858,6 +859,7 @@ export default function App() {
               <button onClick={() => { setVista('satscan'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'satscan', '#059669')}>SaTScan</button>
               <button onClick={() => { setVista('indices'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'indices', '#ea580c')}>Índices</button>
               <button onClick={() => { setVista('ciudad'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'ciudad', '#0891b2')}>Índice por Ciudad</button>
+              <button onClick={() => { setVista('estadisticas'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'estadisticas', '#be123c')}>Estadísticas</button>
             </div>
 
           </aside>
@@ -976,6 +978,7 @@ export default function App() {
         {vista === 'satscan' && <VistaSaTScan radiosGeoJson={geoJsonData} />}
         {vista === 'indices' && <PanelIndices />}
         {vista === 'ciudad' && <VistaPorCiudad />}
+        {vista === 'estadisticas' && <VistaEstadisticas />}
       </div>
 
       {resumenModalOpen && (
