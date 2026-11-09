@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import get_db
-from app.service import clustering_persistencia_service, clustering_service, experimento_service
+from app.service import  clustering_service, experimento_service
 from ._common import filtrar_por_localidad
 
 router = APIRouter()

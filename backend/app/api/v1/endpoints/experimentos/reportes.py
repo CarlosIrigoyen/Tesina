@@ -15,7 +15,6 @@ router = APIRouter()
 class PDFRequest(BaseModel):
     exploracion_optics: dict
     clustering_stdbscan: dict
-    satscan_resultado: dict
     datos_evolucion_temporal: list
     datos_indices: Optional[list] = None
     correlaciones: Optional[dict] = None
@@ -29,7 +28,6 @@ async def exportar_pdf(payload: PDFRequest):
         pdf_bytes = pdf_report_service.generar_pdf_experimento(
             exploracion_optics=payload.exploracion_optics,
             clustering_stdbscan=payload.clustering_stdbscan,
-            satscan_resultado=payload.satscan_resultado,
             datos_evolucion_temporal=evolucion_df,
             datos_indices=payload.datos_indices,
             correlaciones=payload.correlaciones,

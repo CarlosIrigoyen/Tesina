@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { MapContainer, TileLayer, GeoJSON, LayersControl, Circle, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, GeoJSON, LayersControl, useMap } from 'react-leaflet';
 import axios from 'axios';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -76,21 +76,6 @@ export default function VistaPorCiudad() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const [clustering, setClustering] = useState(null);
-  const [exploracion, setExploracion] = useState(null);
-  const [minSamples, setMinSamples] = useState(4);
-  const [maxEpsOptics, setMaxEpsOptics] = useState(10);
-  const [epsTemporal, setEpsTemporal] = useState(2);
-  const [loadingClustering, setLoadingClustering] = useState(false);
-
-  const [satscan, setSatscan] = useState(null);
-  const [satscanMulti, setSatscanMulti] = useState(null);
-  const [maxSpatialPct, setMaxSpatialPct] = useState(0.3);
-  const [maxWeeks, setMaxWeeks] = useState(4);
-  const [nSims, setNSims] = useState(19);
-  const [maxIter, setMaxIter] = useState(5);
-  const [loadingSatscan, setLoadingSatscan] = useState(false);
-
   const [paginaActual, setPaginaActual] = useState(1);
   const filasPorPagina = 10;
 
@@ -165,67 +150,9 @@ export default function VistaPorCiudad() {
     setRadiosGeoJson(null);
     setCasosGeoJson(null);
     setDesagregado([]);
-    setClustering(null);
-    setExploracion(null);
-    setSatscan(null);
-    setSatscanMulti(null);
     setError('');
     setLoading(true);
     setCiudadSel(nuevaCiudad);
-  };
-
-  const ejecutarClustering = async () => {
-    if (!ciudadSel) return;
-    setLoadingClustering(true);
-    try {
-      const locEnc = encodeURIComponent(ciudadSel);
-      const res = await axios.get(
-        `http://localhost:8000/api/v1/experimentos/ciudad/clustering?localidad=${locEnc}&min_samples=${minSamples}&max_eps_optics=${maxEpsOptics}&eps_temporal_semanas=${epsTemporal}`
-      );
-      setExploracion(res.data.exploracion_optics);
-      setClustering(res.data.clustering_final);
-    } catch (e) {
-      console.error(e);
-      alert('Error en clustering local');
-    } finally {
-      setLoadingClustering(false);
-    }
-  };
-
-  const ejecutarSatscan = async () => {
-    if (!ciudadSel) return;
-    setLoadingSatscan(true);
-    try {
-      const locEnc = encodeURIComponent(ciudadSel);
-      const res = await axios.get(
-        `http://localhost:8000/api/v1/experimentos/ciudad/satscan?localidad=${locEnc}&max_spatial_pct=${maxSpatialPct}&max_temporal_weeks=${maxWeeks}&n_simulaciones=${nSims}`
-      );
-      setSatscan(res.data);
-      setSatscanMulti(null);
-    } catch (e) {
-      console.error(e);
-      alert('Error en SaTScan local');
-    } finally {
-      setLoadingSatscan(false);
-    }
-  };
-
-  const ejecutarSatscanIterativo = async () => {
-    if (!ciudadSel) return;
-    setLoadingSatscan(true);
-    try {
-      const locEnc = encodeURIComponent(ciudadSel);
-      const res = await axios.get(
-        `http://localhost:8000/api/v1/experimentos/ciudad/satscan-iterativo?localidad=${locEnc}&max_spatial_pct=${maxSpatialPct}&max_temporal_weeks=${maxWeeks}&n_simulaciones=${nSims}&max_iteraciones=${maxIter}`
-      );
-      setSatscanMulti(res.data);
-      setSatscan(null);
-    } catch (e) {
-      console.error(e);
-      alert('Error en SaTScan iterativo');
-    } finally {
-      setLoadingSatscan(false);
-    }
   };
 
   const pointToLayer = (feature, latlng) => {
@@ -253,14 +180,6 @@ export default function VistaPorCiudad() {
   };
 
   const pct = (v) => (v === null || v === undefined) ? '—' : `${(v * 100).toFixed(1)}%`;
-
-  const semanaLegible = (semAbs) => {
-    const anio = 2000 + Math.floor((semAbs - 1) / 52);
-    const semana = ((semAbs - 1) % 52) + 1;
-    return `${anio} S${String(semana).padStart(2, '0')}`;
-  };
-
-  const coloresIter = ['#dc2626', '#ea580c', '#d97706', '#65a30d', '#0891b2'];
 
   const totalPaginas = Math.ceil(desagregado.length / filasPorPagina);
   const indiceInicio = (paginaActual - 1) * filasPorPagina;
@@ -310,119 +229,6 @@ export default function VistaPorCiudad() {
             ? '...'
             : `${desagregado.length} radios · ${desagregado.reduce((s, r) => s + r.casos, 0)} casos · ${casosGeoJson?.features.length || 0} puntos`}
         </span>
-
-        <span style={{ borderLeft: '1px solid #475569', height: 20 }} />
-
-        <label>
-          minPts:{' '}
-          <input
-            type="number"
-            value={minSamples}
-            onChange={(e) => setMinSamples(+e.target.value)}
-            style={{ width: 45 }}
-          />
-        </label>
-        <label>
-          max_eps:{' '}
-          <input
-            type="number"
-            value={maxEpsOptics}
-            onChange={(e) => setMaxEpsOptics(+e.target.value)}
-            style={{ width: 50 }}
-          />
-        </label>
-        <label>
-          Δt:{' '}
-          <input
-            type="number"
-            value={epsTemporal}
-            onChange={(e) => setEpsTemporal(+e.target.value)}
-            style={{ width: 45 }}
-          />
-        </label>
-        <button
-          onClick={ejecutarClustering}
-          disabled={loadingClustering || !ciudadSel}
-          style={{
-            background: '#7c3aed',
-            color: 'white',
-            border: 'none',
-            padding: '6px 12px',
-            borderRadius: 4,
-            cursor: 'pointer'
-          }}
-        >
-          {loadingClustering ? '...' : '▶ Clustering'}
-        </button>
-
-        <span style={{ borderLeft: '1px solid #475569', height: 20 }} />
-
-        <label>
-          %:{' '}
-          <input
-            type="number"
-            step="0.05"
-            value={maxSpatialPct}
-            onChange={(e) => setMaxSpatialPct(+e.target.value)}
-            style={{ width: 50 }}
-          />
-        </label>
-        <label>
-          sem:{' '}
-          <input
-            type="number"
-            value={maxWeeks}
-            onChange={(e) => setMaxWeeks(+e.target.value)}
-            style={{ width: 45 }}
-          />
-        </label>
-        <label>
-          sims:{' '}
-          <input
-            type="number"
-            value={nSims}
-            onChange={(e) => setNSims(+e.target.value)}
-            style={{ width: 45 }}
-          />
-        </label>
-        <label>
-          iter:{' '}
-          <input
-            type="number"
-            value={maxIter}
-            onChange={(e) => setMaxIter(+e.target.value)}
-            style={{ width: 45 }}
-          />
-        </label>
-
-        <button
-          onClick={ejecutarSatscan}
-          disabled={loadingSatscan || !ciudadSel}
-          style={{
-            background: '#059669',
-            color: 'white',
-            border: 'none',
-            padding: '6px 12px',
-            borderRadius: 4,
-            cursor: 'pointer'
-          }}
-        >
-          {loadingSatscan ? '...' : '▶ SaTScan (1)'}
-        </button>
-        <button
-          onClick={ejecutarSatscanIterativo}
-          disabled={loadingSatscan || !ciudadSel}
-          style={{
-            background: '#b45309',
-            color: 'white',
-            border: 'none',
-            padding: '6px 12px',
-            borderRadius: 4,
-            cursor: 'pointer'
-          }}
-        >
-          {loadingSatscan ? '...' : '▶ SaTScan (múltiple)'}
-        </button>
       </div>
 
       {error && (
@@ -468,46 +274,6 @@ export default function VistaPorCiudad() {
                   />
                 )}
               </Overlay>
-
-              <Overlay checked name="Cilindro SaTScan (único)">
-                {satscan &&
-                  satscan.clusters &&
-                  satscan.clusters.map(
-                    (c, i) =>
-                      c.lat !== undefined &&
-                      c.lon !== undefined && (
-                        <Circle
-                          key={i}
-                          center={[c.lat, c.lon]}
-                          radius={c.radio_km * 1000}
-                          pathOptions={{
-                            color: c.significativo ? '#dc2626' : '#facc15',
-                            fillOpacity: 0.25
-                          }}
-                        />
-                      )
-                  )}
-              </Overlay>
-
-              <Overlay checked name="Cilindros SaTScan (múltiples)">
-                {satscanMulti &&
-                  satscanMulti.clusters &&
-                  satscanMulti.clusters.map(
-                    (c, i) =>
-                      c.lat !== undefined &&
-                      c.lon !== undefined && (
-                        <Circle
-                          key={i}
-                          center={[c.lat, c.lon]}
-                          radius={c.radio_km * 1000}
-                          pathOptions={{
-                            color: coloresIter[i % coloresIter.length],
-                            fillOpacity: 0.15
-                          }}
-                        />
-                      )
-                  )}
-              </Overlay>
             </LayersControl>
           </MapContainer>
           <LeyendaEnfermedades eventos={eventosDisponibles} />
@@ -524,124 +290,6 @@ export default function VistaPorCiudad() {
             maxWidth: 550
           }}
         >
-          {exploracion && clustering && (
-            <div
-              style={{
-                background: 'white',
-                padding: 12,
-                borderRadius: 8,
-                marginBottom: 12,
-                border: '1px solid #e2e8f0'
-              }}
-            >
-              <h4 style={{ marginTop: 0 }}>Clustering local — {ciudadSel}</h4>
-              <p>
-                <b>Clusters:</b> {clustering.n_clusters} | <b>Ruido:</b> {clustering.n_ruido} (
-                {clustering.pct_ruido?.toFixed(1)}%) | <b>Tiempo:</b> {clustering.tiempo_ms?.toFixed(0)} ms
-              </p>
-              <p style={{ fontSize: 12, color: '#475569' }}>
-                ε={clustering.params.eps_espacial_km} km, Δt={clustering.params.eps_temporal_semanas} sem, minPts=
-                {clustering.params.min_samples}
-              </p>
-            </div>
-          )}
-
-          {satscan && (
-            <div
-              style={{
-                background: '#f0fdf4',
-                padding: 12,
-                borderRadius: 8,
-                marginBottom: 12,
-                border: '1px solid #86efac'
-              }}
-            >
-              <h4 style={{ marginTop: 0 }}>SaTScan único — {ciudadSel}</h4>
-              <p>
-                <b>Tiempo:</b> {satscan.tiempo_ms?.toFixed(0)} ms
-              </p>
-              {satscan.clusters &&
-                satscan.clusters.map((c, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      background: 'white',
-                      padding: 10,
-                      marginTop: 8,
-                      borderRadius: 6,
-                      borderLeft: `4px solid ${c.significativo ? '#dc2626' : '#facc15'}`
-                    }}
-                  >
-                    <p>
-                      <b>Centro:</b> radio {c.radio_id_centro}
-                    </p>
-                    <p>
-                      <b>Radio:</b> {c.radio_km} km
-                    </p>
-                    <p>
-                      <b>Periodo:</b> {semanaLegible(c.semana_inicio)} → {semanaLegible(c.semana_fin)}
-                    </p>
-                    <p>
-                      <b>Obs:</b> {c.casos_observados} | <b>Esp:</b> {c.casos_esperados}
-                    </p>
-                    <p>
-                      <b>LLR:</b> {c.llr} | <b>p-value:</b> {c.p_value}
-                    </p>
-                    <p style={{ fontWeight: 'bold', color: c.significativo ? '#059669' : '#dc2626' }}>
-                      {c.significativo ? '✅ Significativo' : '❌ No significativo'}
-                    </p>
-                  </div>
-                ))}
-            </div>
-          )}
-
-          {satscanMulti && (
-            <div
-              style={{
-                background: '#fef3c7',
-                padding: 12,
-                borderRadius: 8,
-                marginBottom: 12,
-                border: '1px solid #fbbf24'
-              }}
-            >
-              <h4 style={{ marginTop: 0 }}>SaTScan iterativo — {ciudadSel}</h4>
-              <p>
-                <b>Clusters detectados:</b> {satscanMulti.n_clusters}
-              </p>
-              <p>
-                <b>Casos sin cluster:</b> {satscanMulti.casos_sin_cluster}
-              </p>
-              {satscanMulti.clusters &&
-                satscanMulti.clusters.map((c, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      background: 'white',
-                      padding: 10,
-                      marginTop: 8,
-                      borderRadius: 6,
-                      borderLeft: `4px solid ${coloresIter[i % coloresIter.length]}`
-                    }}
-                  >
-                    <p>
-                      <b>Iteración {c.iteracion}:</b> radio {c.radio_id_centro}
-                    </p>
-                    <p>
-                      <b>Radio:</b> {c.radio_km} km | <b>Periodo:</b> {semanaLegible(c.semana_inicio)} →{' '}
-                      {semanaLegible(c.semana_fin)}
-                    </p>
-                    <p>
-                      <b>Obs:</b> {c.casos_observados} | <b>Esp:</b> {c.casos_esperados}
-                    </p>
-                    <p>
-                      <b>LLR:</b> {c.llr} | <b>p-value:</b> {c.p_value}
-                    </p>
-                  </div>
-                ))}
-            </div>
-          )}
-
           <h4 style={{ marginTop: 0 }}>Desagregado por radio — {ciudadSel}</h4>
           {desagregado.length === 0 && !loading && <p>Sin datos.</p>}
           {desagregado.length > 0 && (

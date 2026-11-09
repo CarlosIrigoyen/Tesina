@@ -5,7 +5,6 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
 import VistaClustering from './components/VistaClustering';
-import VistaSaTScan from './components/VistaSaTScan';
 import PanelIndices from './components/PanelIndices';
 import VistaPorCiudad from './components/VistaPorCiudad';
 import VistaEstadisticas from './components/VistaEstadisticas';
@@ -25,6 +24,10 @@ const STORAGE_KEYS = {
   resumen: 'app_resumen_v1',
   metricas: 'app_metricas_v1',
 };
+
+const VISTAS_VALIDAS = new Set([
+  'principal', 'clustering', 'indices', 'ciudad', 'estadisticas',
+]);
 
 function MapController({ bounds }) {
   const map = useMap();
@@ -142,7 +145,11 @@ function detectarPicos(serie) {
 }
 
 export default function App() {
-  const [vista, setVista] = useState(() => readStorage(STORAGE_KEYS.vista) || 'principal');
+  const [vista, setVista] = useState(() => {
+    const guardada = readStorage(STORAGE_KEYS.vista);
+    // Si el usuario tenía "satscan" guardado, caer a "principal".
+    return VISTAS_VALIDAS.has(guardada) ? guardada : 'principal';
+  });
 
   const [geoJsonData, setGeoJsonData] = useState(() => readStorage(STORAGE_KEYS.radios));
   const [mapBounds, setMapBounds] = useState(() => readStorage(STORAGE_KEYS.bounds));
@@ -856,7 +863,6 @@ export default function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <button onClick={() => { setVista('principal'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'principal', '#2563eb')}>Principal</button>
               <button onClick={() => { setVista('clustering'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'clustering', '#7c3aed')}>Clustering</button>
-              <button onClick={() => { setVista('satscan'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'satscan', '#059669')}>SaTScan</button>
               <button onClick={() => { setVista('indices'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'indices', '#ea580c')}>Índices</button>
               <button onClick={() => { setVista('ciudad'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'ciudad', '#0891b2')}>Índice por Ciudad</button>
               <button onClick={() => { setVista('estadisticas'); setMenuOpen(false); }} style={menuButtonStyle(vista === 'estadisticas', '#be123c')}>Estadísticas</button>
@@ -975,7 +981,6 @@ export default function App() {
         )}
 
         {vista === 'clustering' && <VistaClustering radiosGeoJson={geoJsonData} />}
-        {vista === 'satscan' && <VistaSaTScan radiosGeoJson={geoJsonData} />}
         {vista === 'indices' && <PanelIndices />}
         {vista === 'ciudad' && <VistaPorCiudad />}
         {vista === 'estadisticas' && <VistaEstadisticas />}
