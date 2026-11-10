@@ -6,46 +6,93 @@ import { leerCluster, leerGuardado, construirEstadoDesdeConfiguracion } from './
 import BarraControles from './BarraControles';
 import MapaClusters from './MapaClusters';
 import PanelLateral from './PanelLateral';
+import ModalRadiosCluster from './ModalRadiosCluster';
+
+function aplicarJitter(geojson) {
+  if (!geojson || !geojson.features) return null;
+  const grupos = {};
+  geojson.features.forEach(f => {
+    const [lon, lat] = f.geometry.coordinates;
+    const key = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+    if (!grupos[key]) grupos[key] = [];
+    grupos[key].push(f);
+  });
+  const featuresResultado = [];
+  Object.values(grupos).forEach(grupo => {
+    const n = grupo.length;
+    if (n === 1) { featuresResultado.push(grupo[0]); return; }
+    const radioJitter = 0.00015 * Math.sqrt(n) / 2;
+    grupo.forEach((f, i) => {
+      const angulo = (2 * Math.PI * i) / n;
+      const dLon = radioJitter * Math.cos(angulo);
+      const dLat = radioJitter * Math.sin(angulo);
+      const [lonOrig, latOrig] = f.geometry.coordinates;
+      featuresResultado.push({
+        ...f,
+        geometry: { type: 'Point', coordinates: [lonOrig + dLon, latOrig + dLat] },
+        properties: { ...f.properties, _jitter_aplicado: true }
+      });
+    });
+  });
+  return { type: 'FeatureCollection', features: featuresResultado };
+}
+
+// Leer estado guardado en sessionStorage al iniciar
+const getSessionState = () => {
+  try {
+    const saved = sessionStorage.getItem('clustering_session_state');
+    return saved ? JSON.parse(saved) : {};
+  } catch { return {}; }
+};
 
 export default function VistaClustering({ radiosGeoJson }) {
+  const savedState = useMemo(() => getSessionState(), []);
   const guardadoInicial = useMemo(() => leerGuardado(STORAGE_KEY), []);
 
-  const [minSamples, setMinSamples] = useState(guardadoInicial.minSamples ?? 5);
-  const [maxEpsOptics, setMaxEpsOptics] = useState(guardadoInicial.maxEpsOptics ?? 20);
-  const [epsTemporal, setEpsTemporal] = useState(guardadoInicial.epsTemporal ?? 2);
+  const [minSamples, setMinSamples] = useState(savedState.minSamples ?? 5);
+  const [maxEpsOptics, setMaxEpsOptics] = useState(savedState.maxEpsOptics ?? 20);
+  const [epsTemporal, setEpsTemporal] = useState(savedState.epsTemporal ?? 2);
 
   const [exploracion, setExploracion] = useState(null);
   const [clustering, setClustering] = useState(null);
-  const [resStknn, setResStknn] = useState(null);
-  const [satscanRes, setSatscanRes] = useState(null);
-  const [comparativa, setComparativa] = useState(null);
-  const [algoritmoActivo, setAlgoritmoActivo] = useState('stdbscan');
-  const [loading, setLoading] = useState(false);
-  const [loadingComp, setLoadingComp] = useState(false);
+  const [loadingDbscan, setLoadingDbscan] = useState(false);
 
   const [casosGeoJson, setCasosGeoJson] = useState(null);
   const [clustersPoligonos, setClustersPoligonos] = useState(null);
   const [clustersInfo, setClustersInfo] = useState([]);
-  const [satscanClusters, setSatscanClusters] = useState([]);
   const [modoMapa, setModoMapa] = useState('clusters');
-  const [clusterSeleccionado, setClusterSeleccionado] = useState(null);
+  
+  const [clusterSeleccionado, setClusterSeleccionado] = useState(savedState.clusterSeleccionado ?? null);
   const [casosDelCluster, setCasosDelCluster] = useState([]);
   const [radiosDelCluster, setRadiosDelCluster] = useState([]);
+  const [modalRadiosAbierto, setModalRadiosAbierto] = useState(false);
+  
   const [radioDetalle, setRadioDetalle] = useState(null);
   const [centroMapa, setCentroMapa] = useState(null);
   const [clustersVisibles, setClustersVisibles] = useState(new Set());
 
-  const [filtroCiudad, setFiltroCiudad] = useState('');
-  const [eventoSeleccionado, setEventoSeleccionado] = useState(null);
-  const [mostrarHeatmap, setMostrarHeatmap] = useState(false);
-  const [mostrarAnimacion, setMostrarAnimacion] = useState(false);
+  const [filtroCiudad, setFiltroCiudad] = useState(savedState.filtroCiudad ?? '');
+  const [eventoSeleccionado, setEventoSeleccionado] = useState(savedState.eventoSeleccionado ?? null);
+  const [mostrarHeatmap, setMostrarHeatmap] = useState(savedState.mostrarHeatmap ?? false);
+  const [mostrarAnimacion, setMostrarAnimacion] = useState(savedState.mostrarAnimacion ?? false);
 
-  const [configuraciones, setConfiguraciones] = useState([]);
-  const [configActivaId, setConfigActivaId] = useState('');
   const [configActiva, setConfigActiva] = useState(null);
-  const [cargandoConfig, setCargandoConfig] = useState(false);
-
   const indicesCache = useRef({});
+
+  // GUARDAR ESTADO EN sessionStorage
+  useEffect(() => {
+    const stateToSave = {
+      filtroCiudad,
+      eventoSeleccionado,
+      mostrarHeatmap,
+      mostrarAnimacion,
+      minSamples,
+      maxEpsOptics,
+      epsTemporal,
+      clusterSeleccionado
+    };
+    sessionStorage.setItem('clustering_session_state', JSON.stringify(stateToSave));
+  }, [filtroCiudad, eventoSeleccionado, mostrarHeatmap, mostrarAnimacion, minSamples, maxEpsOptics, epsTemporal, clusterSeleccionado]);
 
   const cargarTodo = useCallback(async (localidad = '') => {
     try {
@@ -59,33 +106,30 @@ export default function VistaClustering({ radiosGeoJson }) {
       setClustersPoligonos(resPol.data || null);
       const info = resInfo.data || [];
       setClustersInfo(info);
-      setClustersVisibles(new Set(info.map((c) => c.cluster_id)));
+      
+      if (!clusterSeleccionado) {
+        setClustersVisibles(new Set(info.map((c) => c.cluster_id)));
+      }
+      
       setModoMapa('clusters');
-      setSatscanClusters([]);
     } catch (e) { console.error('Error cargando datos:', e); }
-  }, []);
+  }, [clusterSeleccionado]);
 
-  useEffect(() => { void cargarTodo(); }, [cargarTodo]);
+  useEffect(() => { void cargarTodo(filtroCiudad); }, [cargarTodo, filtroCiudad]);
 
-  const cargarListaConfiguraciones = useCallback(async () => {
-    try {
-      const res = await axios.get(`${API}/clustering-configuraciones`);
-      setConfiguraciones(res.data || []);
-      return res.data || [];
-    } catch { return []; }
-  }, []);
-
-  useEffect(() => { void cargarListaConfiguraciones(); }, [cargarListaConfiguraciones]);
+  useEffect(() => {
+    if (clusterSeleccionado && !radiosDelCluster.length) {
+      seleccionarCluster(clusterSeleccionado);
+    }
+  }, [clusterSeleccionado, radiosDelCluster.length]);
 
   const aplicarConfiguracion = useCallback((cfg) => {
     const estado = construirEstadoDesdeConfiguracion(cfg);
     setConfigActiva(cfg);
-    setConfigActivaId(cfg.id);
     setCasosGeoJson(estado.casos);
     setClustersPoligonos(estado.poligonos);
     setClustersInfo(estado.clusters);
     setClustersVisibles(new Set(estado.clusters.map((c) => c.cluster_id)));
-    setSatscanClusters(estado.satscanClusters);
     setModoMapa(estado.modoMapa);
     setFiltroCiudad(estado.localidad);
     setEventoSeleccionado(null);
@@ -94,124 +138,41 @@ export default function VistaClustering({ radiosGeoJson }) {
     setRadiosDelCluster([]);
     setRadioDetalle(null);
     setCentroMapa(null);
-
-    if (estado.algoritmo === 'ST-DBSCAN') {
-      setClustering({ ...estado.resumen, params: estado.params });
-      setExploracion(estado.exploracion);
-      setResStknn(null); setSatscanRes(null);
-    } else if (estado.algoritmo === 'ST-kNN') {
-      setResStknn({ ...estado.resumen, params: estado.params, metricas: estado.metricas });
-      setClustering(null); setExploracion(null); setSatscanRes(null);
-    } else if (estado.algoritmo === 'SaTScan-Poisson') {
-      setSatscanRes({
-        n_clusters_significativos: estado.resumen.n_clusters,
-        clusters: estado.satscanClusters,
-        tiempo_ms: estado.resumen.tiempo_ms,
-      });
-      setClustering(null); setResStknn(null); setExploracion(null);
-    }
+    setClustering({ ...estado.resumen, params: estado.params });
+    setExploracion(estado.exploracion);
   }, []);
 
-  const cargarConfiguracion = async (id) => {
-    if (!id) {
-      setConfigActiva(null); setConfigActivaId('');
-      setClustering(null); setExploracion(null);
-      setResStknn(null); setSatscanRes(null);
-      setFiltroCiudad('');
-      await cargarTodo('');
-      return;
-    }
-    setCargandoConfig(true);
-    try {
-      const res = await axios.get(`${API}/clustering-configuraciones/${id}`);
-      aplicarConfiguracion(res.data);
-    } catch { alert('No se pudo cargar la configuración.'); }
-    finally { setCargandoConfig(false); }
-  };
-
-  const eliminarConfiguracion = async () => {
-    if (!configActivaId) return;
-    if (!window.confirm('¿Eliminar esta configuración guardada?')) return;
-    try {
-      await axios.delete(`${API}/clustering-configuraciones/${configActivaId}`);
-      setConfigActiva(null); setConfigActivaId('');
-      await cargarListaConfiguraciones();
-      await cargarConfiguracion('');
-    } catch { alert('No se pudo eliminar.'); }
-  };
-
   const ejecutar = async () => {
-    setLoading(true);
+    if (!filtroCiudad) { alert('Seleccioná una ciudad antes de ejecutar el clustering.'); return; }
+    setLoadingDbscan(true);
     try {
       const res = await axios.get(`${API}/flujo-clustering`, {
-        params: { min_samples: minSamples, max_eps_optics: maxEpsOptics,
-                  eps_temporal_semanas: epsTemporal,
-                  ...(filtroCiudad ? { localidad: filtroCiudad } : {}) },
+        params: { min_samples: minSamples, max_eps_optics: maxEpsOptics, eps_temporal_semanas: epsTemporal, localidad: filtroCiudad },
       });
       setExploracion(res.data.exploracion_optics);
       setClustering(res.data.clustering_final);
-      setAlgoritmoActivo('stdbscan');
-      await cargarListaConfiguraciones();
-      if (res.data.configuracion?.id) await cargarConfiguracion(res.data.configuracion.id);
+      if (res.data.configuracion) aplicarConfiguracion(res.data.configuracion);
       else await cargarTodo(filtroCiudad);
-    } catch { alert('Error en clustering'); }
-    finally { setLoading(false); }
-  };
-
-  const ejecutarStknn = async () => {
-    setLoading(true);
-    try {
-      const res = await axios.get(`${API}/flujo-clustering-stknn`, {
-        params: { k: minSamples + 1, radio_espacial_km: 10,
-                  radio_temporal_semanas: epsTemporal + 1,
-                  umbral_similaridad: 0.65,
-                  ...(filtroCiudad ? { localidad: filtroCiudad } : {}) },
-      });
-      setResStknn(res.data);
-      setAlgoritmoActivo('stknn');
-      setClustering(null); setExploracion(null);
-      await cargarListaConfiguraciones();
-      if (res.data.configuracion?.id) await cargarConfiguracion(res.data.configuracion.id);
-    } catch { alert('Error en ST-kNN'); }
-    finally { setLoading(false); }
-  };
-
-  const ejecutarComparativa = async () => {
-    setLoadingComp(true);
-    try {
-      const res = await axios.get(`${API}/comparativa-clustering`, {
-        params: { min_samples: minSamples, max_eps_optics: maxEpsOptics,
-                  eps_temporal_semanas: epsTemporal,
-                  ...(filtroCiudad ? { localidad: filtroCiudad } : {}) },
-      });
-      setComparativa(res.data);
-    } catch { alert('Error en comparativa'); }
-    finally { setLoadingComp(false); }
+    } catch (err) {
+      alert(err?.response?.data?.detail || err?.message || 'Error en clustering');
+    } finally { setLoadingDbscan(false); }
   };
 
   const cambiarCiudad = async (valor) => {
-    setFiltroCiudad(valor);
-    setConfigActiva(null); setConfigActivaId('');
-    setClusterSeleccionado(null);
-    setCasosDelCluster([]); setRadiosDelCluster([]);
-    setRadioDetalle(null); setCentroMapa(null);
-    setClustersPoligonos(null); setClustersInfo([]);
-    setClustersVisibles(new Set()); setEventoSeleccionado(null);
+    setFiltroCiudad(valor); setConfigActiva(null); setClusterSeleccionado(null);
+    setCasosDelCluster([]); setRadiosDelCluster([]); setRadioDetalle(null); setCentroMapa(null);
+    setClustersPoligonos(null); setClustersInfo([]); setClustersVisibles(new Set()); setEventoSeleccionado(null);
+    setClustering(null); setExploracion(null);
     await cargarTodo(valor);
   };
 
   const limpiar = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    setConfigActiva(null); setConfigActivaId('');
-    setExploracion(null); setClustering(null);
-    setResStknn(null); setSatscanRes(null);
-    setComparativa(null); setAlgoritmoActivo('stdbscan');
-    setClustersPoligonos(null); setClustersInfo([]);
-    setClusterSeleccionado(null); setCasosDelCluster([]);
-    setRadiosDelCluster([]); setRadioDetalle(null);
-    setClustersVisibles(new Set()); setFiltroCiudad('');
-    setEventoSeleccionado(null); setModoMapa('clusters');
-    setSatscanClusters([]);
+    sessionStorage.removeItem('clustering_session_state');
+    localStorage.removeItem(STORAGE_KEY); 
+    setConfigActiva(null); setExploracion(null); setClustering(null);
+    setClustersPoligonos(null); setClustersInfo([]); setClusterSeleccionado(null); setCasosDelCluster([]);
+    setRadiosDelCluster([]); setRadioDetalle(null); setClustersVisibles(new Set()); setFiltroCiudad('');
+    setEventoSeleccionado(null); setModoMapa('clusters'); 
     cargarTodo('');
   };
 
@@ -219,16 +180,12 @@ export default function VistaClustering({ radiosGeoJson }) {
     setClusterSeleccionado(cluster);
     setClustersVisibles((prev) => new Set(prev).add(cluster.cluster_id));
     setRadioDetalle(null);
-    if (cluster?.centro_lat && cluster?.centro_lon) {
-      setCentroMapa([parseFloat(cluster.centro_lat), parseFloat(cluster.centro_lon)]);
-    }
+    if (cluster?.centro_lat && cluster?.centro_lon) setCentroMapa([parseFloat(cluster.centro_lat), parseFloat(cluster.centro_lon)]);
+    
     if (configActiva) {
-      const features = (configActiva.casos?.features || [])
-        .filter((f) => leerCluster(f) === cluster.cluster_id);
+      const features = (configActiva.casos?.features || []).filter((f) => leerCluster(f) === cluster.cluster_id);
       setCasosDelCluster(features.map((f) => f.properties));
-      const radios = cluster.radios || [];
-      setRadiosDelCluster(radios);
-      setRadioDetalle(radios[0] ?? null);
+      setRadiosDelCluster(cluster.radios || []);
       return;
     }
     try {
@@ -239,15 +196,10 @@ export default function VistaClustering({ radiosGeoJson }) {
       ]);
       setCasosDelCluster(resCasos.data);
       setRadiosDelCluster(resRadios.data);
-      setRadioDetalle(resRadios.data[0] ?? null);
     } catch (e) { console.error(e); }
   };
 
   const seleccionarRadio = async (link) => {
-    const existente = radiosDelCluster.find(
-      (r) => String(r.link ?? r.radio_censal_id) === link
-    );
-    if (existente) return setRadioDetalle(existente);
     if (indicesCache.current[link] !== undefined) return setRadioDetalle(indicesCache.current[link]);
     try {
       const res = await axios.get(`${API}/radio-indices/${encodeURIComponent(link)}`);
@@ -256,16 +208,39 @@ export default function VistaClustering({ radiosGeoJson }) {
     } catch (e) { console.error(e); }
   };
 
-  // -------- derivados --------
+  const casosUniverso = useMemo(() => {
+    if (!casosGeoJson?.features || !filtroCiudad) return 0;
+    return casosGeoJson.features.filter((f) => f.properties?.localidad === filtroCiudad).length;
+  }, [casosGeoJson, filtroCiudad]);
+
   const casosCiudad = useMemo(() => {
     if (!casosGeoJson) return null;
-    return {
-      ...casosGeoJson,
-      features: casosGeoJson.features.filter(
-        (f) => !filtroCiudad || f.properties?.localidad === filtroCiudad
-      ),
-    };
+    return { ...casosGeoJson, features: casosGeoJson.features.filter((f) => !filtroCiudad || f.properties?.localidad === filtroCiudad) };
   }, [casosGeoJson, filtroCiudad]);
+
+  // ARREGLO DEL FILTRO DE ENFERMEDAD
+  const clustersInfoVisibles = useMemo(() => {
+    if (!eventoSeleccionado) return clustersInfo;
+    const ids = new Set();
+    (casosCiudad?.features || []).forEach((f) => {
+      if (f.properties?.evento === eventoSeleccionado) {
+        const c = leerCluster(f);
+        if (c !== null && c !== -1) ids.add(c);
+      }
+    });
+    return clustersInfo.filter((c) => ids.has(c.cluster_id));
+  }, [clustersInfo, casosCiudad, eventoSeleccionado]);
+
+  useEffect(() => {
+    if (eventoSeleccionado && clusterSeleccionado) {
+      const estaVisible = clustersInfoVisibles.some(c => c.cluster_id === clusterSeleccionado.cluster_id);
+      if (!estaVisible) {
+        setClusterSeleccionado(null);
+        setCasosDelCluster([]);
+        setRadiosDelCluster([]);
+      }
+    }
+  }, [clustersInfoVisibles, eventoSeleccionado, clusterSeleccionado]);
 
   const casosFiltrados = useMemo(() => {
     if (!casosCiudad) return null;
@@ -274,12 +249,14 @@ export default function VistaClustering({ radiosGeoJson }) {
       features: casosCiudad.features.filter((f) => {
         if (eventoSeleccionado && f.properties?.evento !== eventoSeleccionado) return false;
         const c = leerCluster(f);
-        if ((clusterSeleccionado || clustersVisibles.size !== clustersInfo.length)
-            && (c === null || c === -1)) return false;
+        if (clusterSeleccionado && c === clusterSeleccionado.cluster_id) return true;
+        if ((clusterSeleccionado || clustersVisibles.size !== clustersInfo.length) && (c === null || c === -1)) return false;
         return c === null || c === -1 || clustersVisibles.has(c);
       }),
     };
   }, [casosCiudad, clustersVisibles, clustersInfo.length, clusterSeleccionado, eventoSeleccionado]);
+
+  const casosConJitter = useMemo(() => aplicarJitter(casosFiltrados), [casosFiltrados]);
 
   const poligonosFiltrados = useMemo(() => {
     if (!clustersPoligonos) return null;
@@ -293,52 +270,35 @@ export default function VistaClustering({ radiosGeoJson }) {
       features: clustersPoligonos.features.filter((f) => {
         const id = f.properties.cluster;
         if (eventoSeleccionado && !clustersConEvento.has(id)) return false;
-        return clustersVisibles.has(id);
+        return clustersVisibles.has(id) || (clusterSeleccionado && clusterSeleccionado.cluster_id === id);
       }),
     };
-  }, [clustersPoligonos, clustersVisibles, eventoSeleccionado, casosFiltrados]);
+  }, [clustersPoligonos, clustersVisibles, eventoSeleccionado, casosFiltrados, clusterSeleccionado]);
 
-  const puntosHeatmap = useMemo(() => (casosFiltrados?.features || []).map((f) => [
-    f.geometry.coordinates[1], f.geometry.coordinates[0], 1,
-  ]), [casosFiltrados]);
+  const puntosHeatmap = useMemo(() => (casosFiltrados?.features || []).map((f) => [f.geometry.coordinates[1], f.geometry.coordinates[0], 1]), [casosFiltrados]);
 
   const radiosMostrados = useMemo(() => {
     if (!radiosGeoJson) return null;
-    const usarFiltrados = filtroCiudad || clusterSeleccionado || eventoSeleccionado
-      || clustersVisibles.size !== clustersInfo.length;
+    const usarFiltrados = filtroCiudad || clusterSeleccionado || eventoSeleccionado || clustersVisibles.size !== clustersInfo.length;
     if (!usarFiltrados) return radiosGeoJson;
-    const ids = new Set(
-      (casosFiltrados?.features || [])
-        .map((f) => f.properties?.radio_censal_id).filter(Boolean).map(String)
-    );
-    return {
-      ...radiosGeoJson,
-      features: radiosGeoJson.features.filter(
-        (f) => ids.has(String(f.properties?.link ?? ''))
-      ),
-    };
+    const ids = new Set((casosFiltrados?.features || []).map((f) => f.properties?.radio_censal_id).filter(Boolean).map(String));
+    return { ...radiosGeoJson, features: radiosGeoJson.features.filter((f) => ids.has(String(f.properties?.link ?? ''))) };
   }, [radiosGeoJson, casosFiltrados, filtroCiudad, clusterSeleccionado, eventoSeleccionado, clustersVisibles, clustersInfo.length]);
 
   const ciudadesDisponibles = useMemo(() => {
     const set = new Set();
-    (casosGeoJson?.features || []).forEach((f) => {
-      if (f.properties?.localidad) set.add(f.properties.localidad);
-    });
+    (casosGeoJson?.features || []).forEach((f) => { if (f.properties?.localidad) set.add(f.properties.localidad); });
     return [...set].sort((a, b) => a.localeCompare(b, 'es'));
   }, [casosGeoJson]);
 
   const enfermedadesCluster = useMemo(() => {
     if (!clusterSeleccionado || !casosCiudad) return [];
     const mapa = new Map();
-    casosCiudad.features
-      .filter((f) => leerCluster(f) === clusterSeleccionado.cluster_id)
-      .forEach((f) => {
-        const e = f.properties?.evento || 'Sin tipo';
-        mapa.set(e, (mapa.get(e) || 0) + 1);
-      });
-    return [...mapa.entries()]
-      .map(([evento, casos]) => ({ evento, casos }))
-      .sort((a, b) => b.casos - a.casos);
+    casosCiudad.features.filter((f) => leerCluster(f) === clusterSeleccionado.cluster_id).forEach((f) => {
+      const e = f.properties?.evento || 'Sin tipo';
+      mapa.set(e, (mapa.get(e) || 0) + 1);
+    });
+    return [...mapa.entries()].map(([evento, casos]) => ({ evento, casos })).sort((a, b) => b.casos - a.casos);
   }, [clusterSeleccionado, casosCiudad]);
 
   const enfermedadesResumen = useMemo(() => {
@@ -347,20 +307,13 @@ export default function VistaClustering({ radiosGeoJson }) {
       const e = f.properties?.evento || 'Sin tipo';
       mapa.set(e, (mapa.get(e) || 0) + 1);
     });
-    return [...mapa.entries()]
-      .map(([evento, casos]) => ({ evento, casos }))
-      .sort((a, b) => b.casos - a.casos);
+    return [...mapa.entries()].map(([evento, casos]) => ({ evento, casos })).sort((a, b) => b.casos - a.casos);
   }, [casosCiudad]);
 
-  const clustersInfoVisibles = useMemo(() => {
-    if (!eventoSeleccionado) return clustersInfo;
-    const ids = new Set();
-    (casosFiltrados?.features || []).forEach((f) => {
-      const c = leerCluster(f);
-      if (c !== null && c !== -1) ids.add(c);
-    });
-    return clustersInfo.filter((c) => ids.has(c.cluster_id));
-  }, [clustersInfo, casosFiltrados, eventoSeleccionado]);
+  // CLUSTERS NAVEGABLES PARA EL MODAL
+  const clustersNavegables = useMemo(() => {
+    return clustersInfo.filter(c => clustersVisibles.has(c.cluster_id));
+  }, [clustersInfo, clustersVisibles]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -369,63 +322,37 @@ export default function VistaClustering({ radiosGeoJson }) {
         maxEpsOptics={maxEpsOptics} setMaxEpsOptics={setMaxEpsOptics}
         epsTemporal={epsTemporal} setEpsTemporal={setEpsTemporal}
         filtroCiudad={filtroCiudad} ciudadesDisponibles={ciudadesDisponibles}
-        cambiarCiudad={cambiarCiudad}
-        configuraciones={configuraciones} configActivaId={configActivaId}
-        cargarConfiguracion={cargarConfiguracion}
-        cargarListaConfiguraciones={cargarListaConfiguraciones}
-        eliminarConfiguracion={eliminarConfiguracion}
-        cargandoConfig={cargandoConfig}
-        eventoSeleccionado={eventoSeleccionado}
-        setEventoSeleccionado={setEventoSeleccionado}
-        loading={loading} algoritmoActivo={algoritmoActivo}
-        ejecutar={ejecutar} ejecutarStknn={ejecutarStknn}
-        ejecutarComparativa={ejecutarComparativa}
-        loadingComp={loadingComp} limpiar={limpiar}
+        cambiarCiudad={cambiarCiudad} eventoSeleccionado={eventoSeleccionado}
+        setEventoSeleccionado={setEventoSeleccionado} ejecutar={ejecutar}
+        limpiar={limpiar} loadingDbscan={loadingDbscan} nCasosDisponibles={casosUniverso}
       />
 
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         <div style={{ flex: 2, position: 'relative' }}>
           <MapaClusters
-            casosCiudad={casosCiudad}
-            casosFiltrados={casosFiltrados}
-            radiosMostrados={radiosMostrados}
-            poligonosFiltrados={poligonosFiltrados}
-            clustersVisibles={clustersVisibles}
-            clustersInfo={clustersInfo}
-            clusterSeleccionado={clusterSeleccionado}
-            eventoSeleccionado={eventoSeleccionado}
-            filtroCiudad={filtroCiudad}
-            mostrarHeatmap={mostrarHeatmap}
-            mostrarAnimacion={mostrarAnimacion}
-            puntosHeatmap={puntosHeatmap}
-            centroMapa={centroMapa}
-            modoMapa={modoMapa}
-            satscanClusters={satscanClusters}
+            casosCiudad={casosCiudad} casosFiltrados={casosConJitter}
+            radiosMostrados={radiosMostrados} poligonosFiltrados={poligonosFiltrados}
+            clustersVisibles={clustersVisibles} clustersInfo={clustersInfo}
+            clusterSeleccionado={clusterSeleccionado} eventoSeleccionado={eventoSeleccionado}
+            filtroCiudad={filtroCiudad} mostrarHeatmap={mostrarHeatmap}
+            mostrarAnimacion={mostrarAnimacion} puntosHeatmap={puntosHeatmap}
+            centroMapa={centroMapa} modoMapa={modoMapa} satscanClusters={[]}
             onSeleccionarRadio={seleccionarRadio}
           />
         </div>
 
         <PanelLateral
-          configActiva={configActiva}
-          exploracion={exploracion}
-          clustering={clustering}
-          resStknn={resStknn}
-          satscanRes={satscanRes}
-          comparativa={comparativa}
+          configActiva={configActiva} exploracion={exploracion} clustering={clustering}
           mostrarHeatmap={mostrarHeatmap} setMostrarHeatmap={setMostrarHeatmap}
           mostrarAnimacion={mostrarAnimacion} setMostrarAnimacion={setMostrarAnimacion}
-          enfermedadesResumen={enfermedadesResumen}
-          filtroCiudad={filtroCiudad}
-          eventoSeleccionado={eventoSeleccionado}
-          setEventoSeleccionado={setEventoSeleccionado}
-          clustersInfoVisibles={clustersInfoVisibles}
-          clustersInfo={clustersInfo}
+          enfermedadesResumen={enfermedadesResumen} filtroCiudad={filtroCiudad}
+          eventoSeleccionado={eventoSeleccionado} setEventoSeleccionado={setEventoSeleccionado}
+          clustersInfoVisibles={clustersInfoVisibles} clustersInfo={clustersInfo}
           clustersVisibles={clustersVisibles}
           toggleCluster={(id) => {
             if (clustersVisibles.has(id)) {
               const nuevo = new Set(clustersVisibles);
-              nuevo.delete(id);
-              setClustersVisibles(nuevo);
+              nuevo.delete(id); setClustersVisibles(nuevo);
               if (clusterSeleccionado?.cluster_id === id) setClusterSeleccionado(null);
             } else {
               const c = clustersInfo.find((x) => x.cluster_id === id);
@@ -436,17 +363,25 @@ export default function VistaClustering({ radiosGeoJson }) {
             if (visible) setClustersVisibles(new Set(clustersInfo.map((c) => c.cluster_id)));
             else { setClustersVisibles(new Set()); setClusterSeleccionado(null); }
           }}
-          clusterSeleccionado={clusterSeleccionado}
-          seleccionarCluster={seleccionarCluster}
+          clusterSeleccionado={clusterSeleccionado} seleccionarCluster={seleccionarCluster}
           cerrarCluster={() => setClusterSeleccionado(null)}
-          casosDelCluster={casosDelCluster}
-          radiosDelCluster={radiosDelCluster}
-          radioDetalle={radioDetalle}
-          enfermedadesCluster={enfermedadesCluster}
-          onSeleccionarRadio={seleccionarRadio}
+          radioDetalle={radioDetalle} enfermedadesCluster={enfermedadesCluster}
           onCerrarRadio={() => setRadioDetalle(null)}
+          onAbrirModalRadios={() => setModalRadiosAbierto(true)}
         />
       </div>
+
+      {/* MODAL DE RADIOS */}
+      {modalRadiosAbierto && clusterSeleccionado && (
+        <ModalRadiosCluster
+          cluster={clusterSeleccionado}
+          radios={radiosDelCluster}
+          casos={casosDelCluster}
+          clustersNavegables={clustersNavegables}
+          onCambiarCluster={seleccionarCluster}
+          onCerrar={() => setModalRadiosAbierto(false)}
+        />
+      )}
     </div>
   );
 }

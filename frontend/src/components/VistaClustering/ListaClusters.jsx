@@ -9,8 +9,7 @@ const btnMin = { background: '#e2e8f0', border: 'none', padding: '2px 6px',
 export default function ListaClusters({
   clustersInfoVisibles, clustersInfo, clustersVisibles, toggleCluster, toggleTodos,
   clusterSeleccionado, seleccionarCluster, cerrarCluster, eventoSeleccionado,
-  casosDelCluster, radiosDelCluster, enfermedadesCluster,
-  onToggleEvento, onSeleccionarRadio,
+  enfermedadesCluster, onToggleEvento, onAbrirModalRadios,
 }) {
   return (
     <SeccionColapsable
@@ -46,13 +45,11 @@ export default function ListaClusters({
               {seleccionado && (
                 <DetalleCluster
                   cluster={c}
-                  casos={casosDelCluster}
-                  radios={radiosDelCluster}
                   enfermedadesCluster={enfermedadesCluster}
                   eventoSeleccionado={eventoSeleccionado}
                   onToggleEvento={onToggleEvento}
-                  onSeleccionarRadio={onSeleccionarRadio}
                   onCerrar={cerrarCluster}
+                  onAbrirModalRadios={onAbrirModalRadios}
                 />
               )}
             </Fragment>
